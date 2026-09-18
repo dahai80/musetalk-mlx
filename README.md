@@ -18,7 +18,7 @@ The neural core is consumed as a dependency — no model code is duplicated here
 ```
 16k mono PCM -> 5s windows (33ms steps) -> Whisper-tiny embedding (50Hz)
 base video frame -> 68-pt DWPose face landmarks -> 256x256 crop -> VAE encode
--> UNet(t=0, audio cross-attn) -> VAE decode -> feather paste-back
+-> UNet(t=0, audio cross-attn) -> VAE decode -> face-parse mask paste-back
 -> output frame with audio-inherited PTS -> LiveKit
 ```
 
@@ -56,6 +56,7 @@ Download via https://hf-mirror.com, or convert the MuseTalk clone's `models/` la
 |---|---|
 | `musetalk-mlx-convert --weights ... --out ...` | PyTorch weights → MLX safetensors dist dir |
 | `musetalk-mlx-offline --weights ... --audio ... --video ... --out ...` | offline: audio + base video → output video |
+| `musetalk-mlx-realtime --weights ... --video ... --livekit-url ... --token ...` | realtime: streaming → LiveKit (FR-LK-001/002) |
 | `pytest tests/ -v` | run tests |
 | `ruff check .` | lint |
 
@@ -76,10 +77,22 @@ covered by `tests/test_landmarks.py` independent of the model.
 
 ## Phase status
 
-- [x] Phase 1 (partial): neural core in fusion-mlx v0.2.0; DWPose bbox math + Kalman + idle-blink wired; MLX DWPose backend pending fusion-mlx
-- [ ] Phase 2: audio streaming polish (prefix cache), zero-copy, offline demo
-- [ ] Phase 3: graph pass + ICB + LiveKit realtime
-- [ ] Phase 4: optional LCM distillation
+- [x] Phase 1 (partial): neural core in fusion-mlx v0.2.0; DWPose bbox math + Kalman + idle-blink wired; MLX DWPose backend pending fusion-mlx #909
+- [x] Phase 2 (business layer): overlapping audio windower (prefix-smoothing), production blend paste-back + pluggable face-parse mask, zero-copy frame sink (copy fallback), offline demo polish. Embedding-level prefix cache pending fusion-mlx #914; face-parse model pending #910; true zero-copy pending #913.
+- [x] Phase 3 (business layer): full thermal degradation ladder (FR-END-003), ReloadModel hot-reload (FR-MLX-006), LiveKit realtime adapter (FR-LK-001/002, audio-inherited PTS, bidirectional audio), realtime runner CLI. Graph pass + ICB perf pending fusion-mlx #911/#912.
+- [x] Phase 4 (stub): LCMFastSession config stub (disabled; main release uses multi-step DDIM). Distillation training out of scope.
+- [ ] Integration testing: gated on fusion-mlx landing #909/#910/#911/#912/#913/#914 — see `tests/integration/INTEGRATION_PENDING.md`.
+
+## fusion-mlx dependency issues
+
+| Issue | Capability | Phase |
+|---|---|---|
+| [#909](https://github.com/dahai80/fusion-mlx/issues/909) | DWPose/RTMPose MLX face landmarks | 1 |
+| [#910](https://github.com/dahai80/fusion-mlx/issues/910) | Face-parsing BiSeNet MLX | 2 |
+| [#911](https://github.com/dahai80/fusion-mlx/issues/911) | Conv+GN+SiLU graph pass + SafeGroupNorm | 3 |
+| [#912](https://github.com/dahai80/fusion-mlx/issues/912) | Metal ICB batched encode | 3 |
+| [#913](https://github.com/dahai80/fusion-mlx/issues/913) | IOSurface↔CVPixelBuffer zero-copy | 3 |
+| [#914](https://github.com/dahai80/fusion-mlx/issues/914) | encode_audio prefix-context cache | 2 |
 
 ## Layout
 

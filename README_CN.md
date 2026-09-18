@@ -16,7 +16,7 @@ MuseTalk 1.5 唇形同步数字人，运行于 Apple Silicon。K12 英语外教�
 ```
 16k 单声道 PCM -> 5s 滑窗（33ms 步长）-> Whisper-tiny 音频 embedding（50Hz）
 底片视频帧 -> 68 点 DWPose 人脸关键点 -> 256x256 crop -> VAE encode
--> UNet(t=0, 音频 cross-attn) -> VAE decode -> 羽化贴回
+-> UNet(t=0, 音频 cross-attn) -> VAE decode -> face-parse 掩码贴回
 -> 携带音频 PTS 的输出帧 -> LiveKit
 ```
 
@@ -54,6 +54,7 @@ weights/
 |---|---|
 | `musetalk-mlx-convert --weights ... --out ...` | PyTorch 权重 → MLX safetensors 发行目录 |
 | `musetalk-mlx-offline --weights ... --audio ... --video ... --out ...` | 离线：音频 + 底片视频 → 输出视频 |
+| `musetalk-mlx-realtime --weights ... --video ... --livekit-url ... --token ...` | 实时：流式 → LiveKit（FR-LK-001/002） |
 | `pytest tests/ -v` | 运行测试 |
 | `ruff check .` | lint |
 
@@ -72,10 +73,22 @@ MLX DWPose/RTMPose 推理后端**尚未在 fusion-mlx 中提供**（已在 dahai
 
 ## 阶段状态
 
-- [x] Phase 1（部分）：神经核心已在 fusion-mlx v0.2.0；DWPose bbox 数学 + 卡尔曼 + 待机眨眼已接入；MLX DWPose 后端待 fusion-mlx 提供
-- [ ] Phase 2：音频流式打磨（前缀缓存）、零拷贝、离线 Demo
-- [ ] Phase 3：图优化 + ICB + LiveKit 实时
-- [ ] Phase 4：可选 LCM 蒸馏
+- [x] Phase 1（部分）：神经核心已在 fusion-mlx v0.2.0；DWPose bbox 数学 + 卡尔曼 + 待机眨眼已接入；MLX DWPose 后端待 fusion-mlx #909
+- [x] Phase 2（业务层）：重叠音频滑窗（前缀平滑）、生产级融合贴回 + 可插拔 face-parse 掩码、零拷贝帧汇（拷贝兜底）、离线 Demo 打磨。embedding 级前缀缓存待 fusion-mlx #914；face-parse 模型待 #910；真零拷贝待 #913。
+- [x] Phase 3（业务层）：完整温控降级阶梯（FR-END-003）、ReloadModel 热重载（FR-MLX-006）、LiveKit 实时适配器（FR-LK-001/002，音频继承 PTS，双向音频）、实时运行 CLI。图优化 + ICB 性能待 fusion-mlx #911/#912。
+- [x] Phase 4（桩）：LCMFastSession 配置桩（默认关闭；主版本用多步 DDIM）。蒸馏训练不在本仓库范围。
+- [ ] 集成测试：待 fusion-mlx 落地 #909/#910/#911/#912/#913/#914 — 见 `tests/integration/INTEGRATION_PENDING.md`。
+
+## fusion-mlx 依赖 issue
+
+| Issue | 能力 | 阶段 |
+|---|---|---|
+| [#909](https://github.com/dahai80/fusion-mlx/issues/909) | DWPose/RTMPose MLX 人脸关键点 | 1 |
+| [#910](https://github.com/dahai80/fusion-mlx/issues/910) | Face-parsing BiSeNet MLX | 2 |
+| [#911](https://github.com/dahai80/fusion-mlx/issues/911) | Conv+GN+SiLU 图熔合 + SafeGroupNorm | 3 |
+| [#912](https://github.com/dahai80/fusion-mlx/issues/912) | Metal ICB 批量编码 | 3 |
+| [#913](https://github.com/dahai80/fusion-mlx/issues/913) | IOSurface↔CVPixelBuffer 零拷贝 | 3 |
+| [#914](https://github.com/dahai80/fusion-mlx/issues/914) | encode_audio 前缀上下文缓存 | 2 |
 
 ## 目录结构
 

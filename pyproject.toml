@@ -37,6 +37,7 @@ dev = [
 
 [project.scripts]
 musetalk-mlx-offline = "musetalk_mlx.tools.offline_infer:main"
+musetalk-mlx-realtime = "musetalk_mlx.tools.realtime_infer:main"
 musetalk-mlx-convert = "musetalk_mlx.tools.convert_weights:main"
 
 [tool.setuptools.packages.find]

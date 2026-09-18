@@ -7,9 +7,12 @@ CHANNELS = 1
 
 # FR-END-001: 33ms inference step aligned to 30FPS, 5s sliding audio window.
 # Step is derived as SR // FPS (533 samples) so a 5s window is an integer
-# number of steps (150).
+# number of steps (150). Windows overlap by OVERLAP_S so the boundary audio is
+# re-encoded (musetalk-mlx half of FR-END-001); the embedding-level prefix cache
+# is fusion-mlx issue #914.
 STEP_MS = 33
 WINDOW_S = 5.0
+OVERLAP_S = 0.2  # tail/head overlap between consecutive 5s windows
 
 # Face patch (256x256 crop -> 32x32 latent) and 1080p output.
 PATCH = 256
@@ -33,6 +36,10 @@ THERMAL_CRITICAL = 2
 DDIM_STEPS = 15
 DDIM_STEPS_SERIOUS = 8
 FRAME_REUSE = 3  # critical: infer 1 of N frames, repeat the rest
+BG_DOWNSCALE_CRITICAL = 2  # critical: bg rendered at 1/N res then upsampled
+PATCH_CRITICAL = 128  # critical last-resort: face patch 256 -> 128
+BLEND_EXPAND = 1.5  # production paste expand factor (MuseTalk blending.get_crop_box)
+BLEND_UPPER_BOUNDARY_RATIO = 0.5  # keep lower mouth region of the parse mask
 
 # FR-MLX-001 / FR-END-006 landmark robustness.
 KEYPOINT_FAIL_IDLE = 5  # consecutive failures -> idle-blink state
@@ -41,3 +48,10 @@ KALMAN_HISTORY = 5
 # Non-functional budgets.
 MEM_BUDGET_GB = 4.0
 LEAK_BUDGET_MB = 50.0  # over a 2h session
+
+# Phase 4 (non-blocking): LCM single-step stub. No distillation here — the
+# 1-step weights must be distilled+converted separately; main release uses
+# multi-step DDIM (DDIM_STEPS). Flag flips the session to the LCM fast path
+# once fusion-mlx ships compatible 1-step weights.
+LCM_ENABLED = False
+LCM_STEPS = 1
