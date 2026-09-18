@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "musetalk-mlx"
+version = "0.1.0"
+description = "MuseTalk 1.5 lip-sync digital human on Apple Silicon — business layer over fusion-mlx (K12 English teacher, LiveKit)"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.11"
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+# Neural core (UNet / SD-VAE / Whisper-tiny + MuseTalkPipeline) lives in the
+# fusion-mlx foundation: fusion_mlx.video.musetalk_mlx. The [video] extra
+# brings opencv/librosa/imageio. Local file:// pin for dev — switch to the
+# PyPI release once fusion-mlx publishes a version with musetalk_mlx >= 0.2.0.
+dependencies = [
+    "fusion-mlx[video] @ file:///Users/dahai/fusion/fusion-mlx",
+]
+
+[project.optional-dependencies]
+livekit = [
+    "livekit>=1.0",
+    "livekit-api>=1.0",
+]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+musetalk-mlx-offline = "musetalk_mlx.tools.offline_infer:main"
+musetalk-mlx-convert = "musetalk_mlx.tools.convert_weights:main"
+
+[tool.setuptools.packages.find]
+include = ["musetalk_mlx*"]
+
+[tool.ruff]
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "PIE", "RUF"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
