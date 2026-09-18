@@ -60,7 +60,7 @@ class FaceParseMask(MaskProvider):
         ph, pw = y_e - y_s, x_e - x_s
         if ph <= 0 or pw <= 0:
             return np.zeros((0, 0), dtype=np.float32), crop_box
-        labels = self.backend.parse(frame_bgr[y_s:y_e, x_s:x_e])
+        labels, _face_mask = self.backend.parse(frame_bgr[y_s:y_e, x_s:x_e])
         mask = np.isin(labels, _FACE_CLASSES).astype(np.float32)
         mask = _lower_band(mask)
         k = max(1, int(0.1 * ph // 2) * 2 + 1)

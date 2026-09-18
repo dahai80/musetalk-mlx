@@ -77,7 +77,7 @@ MLX DWPose/RTMPose 推理后端**尚未在 fusion-mlx 中提供**（已在 dahai
 - [x] Phase 2（业务层）：重叠音频滑窗（前缀平滑）、生产级融合贴回 + 可插拔 face-parse 掩码、零拷贝帧汇（拷贝兜底）、离线 Demo 打磨。embedding 级前缀缓存待 fusion-mlx #914；face-parse 模型待 #910；真零拷贝待 #913。
 - [x] Phase 3（业务层）：完整温控降级阶梯（FR-END-003）、ReloadModel 热重载（FR-MLX-006）、LiveKit 实时适配器（FR-LK-001/002，音频继承 PTS，双向音频）、实时运行 CLI。图优化 + ICB 性能待 fusion-mlx #911/#912。
 - [x] Phase 4（桩）：LCMFastSession 配置桩（默认关闭；主版本用多步 DDIM）。蒸馏训练不在本仓库范围。
-- [ ] 集成测试：待 fusion-mlx 落地 #909/#910/#911/#912/#913/#914 — 见 `tests/integration/INTEGRATION_PENDING.md`。
+- [ ] 集成测试：神经核心已验证（7 个集成测试通过）；DWPose/face-parse 权重加载被 fusion-mlx #915 阻塞 — 见 `tests/integration/INTEGRATION_PENDING.md`。
 
 ## fusion-mlx 依赖 issue
 
@@ -89,6 +89,7 @@ MLX DWPose/RTMPose 推理后端**尚未在 fusion-mlx 中提供**（已在 dahai
 | [#912](https://github.com/dahai80/fusion-mlx/issues/912) | Metal ICB 批量编码 | 3 |
 | [#913](https://github.com/dahai80/fusion-mlx/issues/913) | IOSurface↔CVPixelBuffer 零拷贝 | 3 |
 | [#914](https://github.com/dahai80/fusion-mlx/issues/914) | encode_audio 前缀上下文缓存 | 2 |
+| [#915](https://github.com/dahai80/fusion-mlx/issues/915) | convert_dwpose/convert_face_parsing 键名不匹配 + mel 资源未打包 | 1/2 |
 
 ## 目录结构
 

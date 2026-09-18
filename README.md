@@ -81,7 +81,7 @@ covered by `tests/test_landmarks.py` independent of the model.
 - [x] Phase 2 (business layer): overlapping audio windower (prefix-smoothing), production blend paste-back + pluggable face-parse mask, zero-copy frame sink (copy fallback), offline demo polish. Embedding-level prefix cache pending fusion-mlx #914; face-parse model pending #910; true zero-copy pending #913.
 - [x] Phase 3 (business layer): full thermal degradation ladder (FR-END-003), ReloadModel hot-reload (FR-MLX-006), LiveKit realtime adapter (FR-LK-001/002, audio-inherited PTS, bidirectional audio), realtime runner CLI. Graph pass + ICB perf pending fusion-mlx #911/#912.
 - [x] Phase 4 (stub): LCMFastSession config stub (disabled; main release uses multi-step DDIM). Distillation training out of scope.
-- [ ] Integration testing: gated on fusion-mlx landing #909/#910/#911/#912/#913/#914 — see `tests/integration/INTEGRATION_PENDING.md`.
+- [ ] Integration testing: neural core verified (7 integration tests green); DWPose/face-parse weight loading blocked by fusion-mlx #915 — see `tests/integration/INTEGRATION_PENDING.md`.
 
 ## fusion-mlx dependency issues
 
@@ -93,6 +93,7 @@ covered by `tests/test_landmarks.py` independent of the model.
 | [#912](https://github.com/dahai80/fusion-mlx/issues/912) | Metal ICB batched encode | 3 |
 | [#913](https://github.com/dahai80/fusion-mlx/issues/913) | IOSurface↔CVPixelBuffer zero-copy | 3 |
 | [#914](https://github.com/dahai80/fusion-mlx/issues/914) | encode_audio prefix-context cache | 2 |
+| [#915](https://github.com/dahai80/fusion-mlx/issues/915) | convert_dwpose/convert_face_parsing key mismatch + mel asset packaging | 1/2 |
 
 ## Layout
 

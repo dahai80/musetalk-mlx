@@ -44,6 +44,7 @@ class MuseTalkSession:
         self._pending = deque()  # (chunk (50,384), pts seconds)
         self._last_frame = None
         self._reuse = 0
+        self._audio_prefix = None  # fusion-mlx #914: prior window's tail embedding
         log.info(
             "MuseTalkSession ready: bg=%s frames=%d step=%d (%.1fms)",
             bg_video_path,
@@ -67,6 +68,7 @@ class MuseTalkSession:
         md = mlx_dir if mlx_dir is not None else self._mlx_dir
         log.info("ReloadModel: draining %d pending chunks, rebuilding pipe", len(self._pending))
         self._pending.clear()
+        self._audio_prefix = None  # reset prefix cache on model swap
         try:
             new_pipe = self._build_pipe(wd, md)
         except Exception as e:
@@ -95,13 +97,16 @@ class MuseTalkSession:
         # Drain every fully-buffered overlapping 5s window into per-step chunks.
         # The windower prepends the prior window's overlap tail for boundary
         # smoothing; those prefix chunks were already emitted, so skip them.
-        # fusion-mlx #914 will add the embedding-level prefix cache.
+        # fusion-mlx #914: encode_audio returns (chunks, tail); the tail is the
+        # embedding-level prefix spliced into the next window to smooth the
+        # Transformer slice boundary (lip teleport at 5s edges).
         while True:
             w, pts0 = self._windower.pop_window()
             if w is None:
                 break
             mel = log_mel_spectrogram(mx.array(w))  # (1,80,3000), 30s pad
-            chunks = self.pipe.encode_audio(mel, len(w), fps=self.fps)
+            chunks, tail = self.pipe.encode_audio(mel, len(w), fps=self.fps, prefix=self._audio_prefix)
+            self._audio_prefix = tail
             skip = round(self._windower.prefix_samples / self.step) if self._windower.prefix_samples else 0
             n = chunks.shape[0]
             for i in range(skip, n):

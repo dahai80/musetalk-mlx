@@ -62,7 +62,7 @@ class LandmarkTracker:
     def detect(self, frame_bgr: np.ndarray):
         if self.backend is None:
             return None
-        return self.backend.detect_face_landmarks(frame_bgr)
+        return self.backend.face_landmarks(frame_bgr)
 
     def update(self, frame_bgr: np.ndarray):
         pts = self.detect(frame_bgr)

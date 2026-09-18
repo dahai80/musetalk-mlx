@@ -11,7 +11,9 @@ log = logging.getLogger(__name__)
 
 def main() -> int:
     p = argparse.ArgumentParser(description="Offline MuseTalk inference: audio + base video -> output video")
-    p.add_argument("--weights", required=True, help="weights root (from_pretrained layout)")
+    p.add_argument(
+        "--weights", default=None, help="weights root (from_pretrained layout; omit with --mlx-dir)"
+    )
     p.add_argument("--mlx-dir", default=None, help="MLX dist dir (musetalk-mlx-convert output); torch-free")
     p.add_argument("--audio", required=True, help="input wav (any sr, resampled to 16k)")
     p.add_argument("--video", required=True, help="base video (looped)")

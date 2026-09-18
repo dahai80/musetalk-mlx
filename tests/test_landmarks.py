@@ -61,7 +61,7 @@ def test_kalman_reduces_jitter():
 
 
 class _NullBackend:
-    def detect_face_landmarks(self, frame_bgr):
+    def face_landmarks(self, frame_bgr):
         return None
 
 
@@ -69,7 +69,7 @@ class _FixedBackend:
     def __init__(self):
         self.n = 0
 
-    def detect_face_landmarks(self, frame_bgr):
+    def face_landmarks(self, frame_bgr):
         self.n += 1
         return _synth_face()
 
