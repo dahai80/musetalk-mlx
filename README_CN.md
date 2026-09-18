@@ -15,7 +15,7 @@ MuseTalk 1.5 唇形同步数字人，运行于 Apple Silicon。K12 英语外教�
 
 ```
 16k 单声道 PCM -> 5s 滑窗（33ms 步长）-> Whisper-tiny 音频 embedding（50Hz）
-底片视频帧 -> 5 点关键点 -> 256x256 crop -> VAE encode
+底片视频帧 -> 68 点 DWPose 人脸关键点 -> 256x256 crop -> VAE encode
 -> UNet(t=0, 音频 cross-attn) -> VAE decode -> 羽化贴回
 -> 携带音频 PTS 的输出帧 -> LiveKit
 ```
@@ -57,9 +57,22 @@ weights/
 | `pytest tests/ -v` | 运行测试 |
 | `ruff check .` | lint |
 
+## DWPose / 人脸关键点
+
+`LandmarkTracker` 消费 68 点 DWPose 人脸关键点（COCO-WholeBody `[23:91]`，
+与 MuseTalk `preprocessing.get_landmark_and_bbox` 同约定），通过
+`derive_face_bbox` 推导轴向对齐 crop bbox。关键点用向量化常速度卡尔曼滤波平滑；
+单帧检测丢失则保持上一帧姿态，连续 `KEYPOINT_FAIL_IDLE` 帧丢失进入待机眨眼
+（原样输出底片帧）。
+
+MLX DWPose/RTMPose 推理后端**尚未在 fusion-mlx 中提供**（已在 dahai80/fusion-mlx
+提 issue 跟踪）。`load_dwpose_backend()` 探测 `fusion_mlx.video.dwpose`，缺失时回退
+待机眨眼，保证管线可运行。bbox 数学、卡尔曼平滑与待机逻辑由 `tests/test_landmarks.py`
+覆盖，不依赖模型。
+
 ## 阶段状态
 
-- [x] Phase 1（部分）：神经核心已在 fusion-mlx v0.2.0；DWPose/卡尔曼待补
+- [x] Phase 1（部分）：神经核心已在 fusion-mlx v0.2.0；DWPose bbox 数学 + 卡尔曼 + 待机眨眼已接入；MLX DWPose 后端待 fusion-mlx 提供
 - [ ] Phase 2：音频流式打磨（前缀缓存）、零拷贝、离线 Demo
 - [ ] Phase 3：图优化 + ICB + LiveKit 实时
 - [ ] Phase 4：可选 LCM 蒸馏

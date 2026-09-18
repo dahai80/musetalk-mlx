@@ -43,7 +43,10 @@ class MuseTalkSession:
         self._reuse = 0
         log.info(
             "MuseTalkSession ready: bg=%s frames=%d step=%d (%.1fms)",
-            bg_video_path, self._bg_n, self.step, self.step / self.sr * 1000,
+            bg_video_path,
+            self._bg_n,
+            self.step,
+            self.step / self.sr * 1000,
         )
 
     def push_audio(self, pcm: np.ndarray) -> None:
