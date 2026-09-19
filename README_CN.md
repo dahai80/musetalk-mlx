@@ -129,6 +129,7 @@ crop。bbox 数学、卡尔曼平滑、守卫与待机逻辑由 `tests/test_land
 | [#918](https://github.com/dahai80/fusion-mlx/issues/918) | `compile_with_custom_pass` 是空壳 — **v0.10.3 已修；musetalk 拓扑匹配 0 处** | 3 |
 | [#919](https://github.com/dahai80/fusion-mlx/issues/919) | Metal conv2d fp16 吞吐悬崖 — **v0.10.3 已修；SmartConv2d 数值正确但图内慢 1.5×，默认关** | 3 |
 | [#920](https://github.com/dahai80/fusion-mlx/issues/920) | 默认 allocator cache 无界增长 — **v0.10.3 已修** | 3 |
+| [#921](https://github.com/dahai80/fusion-mlx/issues/921) | Metal conv2d fp16 kernel 悬崖 — 30FPS 最后阻塞项（decode 58ms 需降到 ~20ms） | 3 |
 
 ## 目录结构
 

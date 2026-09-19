@@ -79,6 +79,12 @@ WORSE in-graph and was rejected) are exhausted.
 NOTE: `com.linguakids.watchdog` (launchd) auto-restarts the fusion-mlx
 server every interval — benchmarks are meaningless while it runs.
 
+Upstream follow-ups filed 2026-09-19: #919 comment (in-graph A/B data,
+dispatch-rule recalibration proposal), #918 comment (musetalk topology
+matches 0 sites; `groupnorm_silu_conv` pre-conv pattern request), #921
+(new) — Metal conv2d fp16 kernel cliffs as the sole remaining 30FPS
+blocker, with Winograd + ICB + kernel-selection proposals.
+
 ## Verified (tests/integration/, green)
 
 - `test_neural_core.py`:
