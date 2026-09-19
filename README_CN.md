@@ -80,6 +80,18 @@ crop。bbox 数学、卡尔曼平滑、守卫与待机逻辑由 `tests/test_land
 - [x] Phase 4（桩）：LCMFastSession 配置桩（默认关闭；主版本用多步 DDIM）。蒸馏训练不在本仓库范围。
 - [ ] 集成测试：神经核心已验证（7 个集成测试通过）；#915 修复已验证（权重严格加载 + mel 打包）；真实关键点唇形对齐被 fusion-mlx #917（DWPose 输出损坏）阻塞 — 见 `tests/integration/INTEGRATION_PENDING.md`。
 
+## PRD V1.1-RC2 差距补齐（本次发布）
+
+- 对 PyTorch 的分层精度 parity 测试（`tests/parity/`）：Whisper 编码器、VAE encode（cosine ≥ 0.98）、VAE decode（PSNR ≥ 38dB）、8 通道 UNet（cosine ≥ 0.98）。fixture 在 torch 环境一次性生成（`musetalk_mlx/tools/gen_parity_fixtures.py`），测试时无 torch 依赖。
+- 单帧关键点丢失走 Kalman 预测（FR-END-006）：位置+速度外推，连续 5 帧丢失才进 idle-blink；含 bbox 合理性 + 离群点剔除守卫。
+- 温控降级阶梯全链路接入 session（FR-END-003）：砍步数 → 帧复用(3) → 背景降采样(2) → patch 256→128（绝不直接 256→128）。
+- 底片帧预加载内存池（FR-END-002），保留流式兜底。
+- 通过 fusion-mlx `compile_with_custom_pass`（#911）消费图优化 Pass，探测式优雅降级。
+- 帧输出接 `MetalZeroCopyBridge.array_to_cvbuffer`（#913）零拷贝，保留拷贝兜底。
+- 分阶段 profiler（STFT/Whisper/UNet/VAE/warp/frame-out）、phys-footprint 内存采样、最大连续分配探测（`musetalk_mlx/utils/profiling.py`）。
+- 运维工具：`musetalk-mlx-benchmark`（FPS + 分阶段预算，PRD 9.5）、`musetalk-mlx-stress`（长会话泄漏 ≤ 50MB + 碎片探测）。
+- 边界输入测试：小于 10ms 音频、全静音、满幅削波。
+
 ## fusion-mlx 依赖 issue
 
 | Issue | 能力 | 阶段 |

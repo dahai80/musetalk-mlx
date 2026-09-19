@@ -46,6 +46,14 @@ class _KalmanSmoother:
         self.p[:, 1, 1] = p11 - k1 * p01
         return self.x[:, 0].copy()
 
+    def predict(self) -> np.ndarray:
+        # FR-END-006: on a single-frame miss, the KF prediction (pos advanced by
+        # its velocity) replaces the detection instead of freezing the last pose.
+        self.x[:, 0] += self.x[:, 1]
+        self.p[:, 0, 0] += self.p[:, 1, 1] + self.q
+        self.p[:, 0, 1] += self.p[:, 1, 1]
+        return self.x[:, 0].copy()
+
 
 class LandmarkTracker:
     # 68-pt DWPose face landmarks with miss handling (PRD FR-MLX-001/FR-END-006):
@@ -105,8 +113,11 @@ class LandmarkTracker:
             log.warning("landmarks lost/implausible for %d frames, entering idle-blink state", self.fails)
         if self.idle:
             return None
-        log.debug("landmark miss #%d, holding last known pose", self.fails)
-        return self.last
+        if self.last is None:
+            return None
+        pred = self.kf.predict().reshape(NUM_FACE_KPTS, 2)
+        log.debug("landmark miss #%d, Kalman-predicted pose replaces detection", self.fails)
+        return pred
 
     def _plausible_bbox(self, lm: np.ndarray, frame_shape) -> bool:
         bbox = derive_face_bbox(lm, self.upperbondrange)

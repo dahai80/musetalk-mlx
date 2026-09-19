@@ -15,6 +15,7 @@ from ..face.mask import load_face_parse
 from ..pipeline.blending import paste_back
 from ..pipeline.lcm import LCMFastSession
 from ..utils.audio import AudioWindower
+from ..utils.profiling import StageProfiler
 from ..utils.thermal import ladder_for_tier, thermal_tier
 
 log = logging.getLogger(__name__)
@@ -45,10 +46,16 @@ class MuseTalkSession:
         self._last_frame = None
         self._reuse = 0
         self._audio_prefix = None  # fusion-mlx #914: prior window's tail embedding
+        self.profiler = StageProfiler()
+        self._croppers = {}  # patch size -> FaceCropper (thermal ladder 256/128)
+        self._bg_pool = None  # FR-END-002: preloaded base-video frame pool
+        self._expected_pts = None  # observability: PTS sync-deviation logging
+        self._setup_graph_pass()
+        self._preload_bg()
         log.info(
             "MuseTalkSession ready: bg=%s frames=%d step=%d (%.1fms)",
             bg_video_path,
-            self._bg_n,
+            len(self._bg_pool or []),
             self.step,
             self.step / self.sr * 1000,
         )
@@ -76,6 +83,7 @@ class MuseTalkSession:
             return False
         self.pipe = new_pipe
         self.lcm = LCMFastSession(new_pipe)
+        self._setup_graph_pass()
         self._weights_dir = wd
         self._mlx_dir = md
         log.info("ReloadModel done")
@@ -91,6 +99,12 @@ class MuseTalkSession:
             return None
         chunk, pts = self._pending.popleft()
         frame = self._render(chunk)
+        self.profiler.tick()
+        if self._expected_pts is not None:
+            dev = abs(pts - self._expected_pts)
+            if dev > 2 * self.step / self.sr:
+                log.warning("PTS sync deviation %.1fms at pts=%.3fs", dev * 1000, pts)
+        self._expected_pts = pts + self.step / self.sr
         return frame, pts
 
     def _encode_windows(self) -> None:
@@ -100,12 +114,18 @@ class MuseTalkSession:
         # fusion-mlx #914: encode_audio returns (chunks, tail); the tail is the
         # embedding-level prefix spliced into the next window to smooth the
         # Transformer slice boundary (lip teleport at 5s edges).
+        pf = self.profiler
         while True:
+            pf.begin("stft")
             w, pts0 = self._windower.pop_window()
             if w is None:
+                pf.end()
                 break
             mel = log_mel_spectrogram(mx.array(w))  # (1,80,3000), 30s pad
+            pf.end()
+            pf.begin("whisper")
             chunks, tail = self.pipe.encode_audio(mel, len(w), fps=self.fps, prefix=self._audio_prefix)
+            pf.end()
             self._audio_prefix = tail
             skip = round(self._windower.prefix_samples / self.step) if self._windower.prefix_samples else 0
             n = chunks.shape[0]
@@ -114,6 +134,8 @@ class MuseTalkSession:
             log.debug("encoded window pts=%.3fs -> %d chunks (skipped %d prefix)", pts0, n - skip, skip)
 
     def _render(self, chunk) -> np.ndarray:
+        pf = self.profiler
+        pf.begin("frame_out")
         tier = thermal_tier()
         ladder = ladder_for_tier(tier)
         if ladder["frame_reuse"] > 1:
@@ -127,14 +149,35 @@ class MuseTalkSession:
         frame = self._bg_frame(downscale=ladder["bg_downscale"])
         landmarks = self._tracker.update(frame)
         if landmarks is None or self._tracker.idle:
+            pf.end()
             return frame
-        crop, bbox = self._cropper.crop(frame, landmarks)
+        # FR-END-003 strategy D (last resort): face patch 256 -> 128; croppers
+        # cached per size so no 256->128 jump path skips the earlier rungs.
+        patch = ladder["patch"]
+        if patch not in self._croppers:
+            self._croppers[patch] = FaceCropper(size=patch, upperbondrange=self._cropper.upperbondrange)
+        crop, bbox = self._croppers[patch].crop(frame, landmarks)
+        pf.end()
+        pf.begin("vae")
         latent = self.pipe.get_latents_for_unet(crop)
-        face = self.lcm.generate(latent, chunk)
+        pf.end()
+        pf.begin("unet")
+        face = None
+        if self._compiled_generate is not None:
+            try:
+                face = self._compiled_generate(latent, chunk)[0]
+            except Exception as e:
+                log.warning("compiled generate failed (%s); plain path", e)
+                self._compiled_generate = None
+        if face is None:
+            face = self.lcm.generate(latent, chunk)
         if face is None:
             dtype = getattr(self.pipe, "_dtype", mx.float32)
             face = self.pipe.generate_faces(latent, mx.array(chunk[None]).astype(dtype))[0]
+        pf.end()
+        pf.begin("warp")
         out = paste_back(frame, face, bbox, mask_provider=self._mask)
+        pf.end()
         self._last_frame = out
         return out
 
@@ -144,7 +187,51 @@ class MuseTalkSession:
             setter(steps)
             log.debug("ddim steps set to %d", steps)
 
+    def _setup_graph_pass(self) -> None:
+        # FR-MLX-003: consume the fusion-mlx #911 graph pass (Conv+GN+SiLU
+        # fusion) when available; mx.compile-wraps the UNet entry point.
+        self._compiled_generate = None
+        if not config.GRAPH_OPT:
+            log.info("graph pass disabled by config flag")
+            return
+        try:
+            from fusion_mlx.graph_opt import compile_with_custom_pass
+
+            fn = self.pipe.generate_faces
+            self._compiled_generate = compile_with_custom_pass(fn)
+            log.info("fusion-mlx graph pass applied to generate_faces (#911)")
+        except Exception as e:
+            self._compiled_generate = None
+            log.info("graph pass unavailable (%s); plain generate_faces", e)
+
+    def _preload_bg(self) -> None:
+        # FR-END-002: preload the base-video frames into a memory pool (looped
+        # serving from RAM, no per-frame decode cost). Logs pool memory cost.
+        frames = []
+        try:
+            for rgb in self._bg:
+                frames.append(cv2.cvtColor(np.asarray(rgb), cv2.COLOR_RGB2BGR))
+        except Exception as e:
+            # imageio v2 reader raises at stream end; keep collected frames.
+            log.debug("bg preload stopped at %d frames (%s)", len(frames), e)
+        self._bg_pool = frames
+        self._bg_n = len(frames)
+        self._bg_idx = 0
+        mb = sum(f.nbytes for f in frames) / (1024 * 1024)
+        log.info("bg pool preloaded %d frames (pool %.0fMB)", len(frames), mb)
+
     def _bg_frame(self, downscale: int = 1) -> np.ndarray:
+        # Serve from the preloaded pool (FR-END-002); looped. downscale > 1
+        # (FR-END-003 strategy C) renders the frame at reduced res then
+        # upsamples — compute saved outside the face ROI, face patch unaffected.
+        if self._bg_pool:
+            rgb = self._bg_pool[self._bg_idx % len(self._bg_pool)]
+            self._bg_idx += 1
+            if downscale > 1:
+                h, w = rgb.shape[:2]
+                small = cv2.resize(rgb, (w // downscale, h // downscale), interpolation=cv2.INTER_AREA)
+                rgb = cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
+            return rgb
         idx = self._bg_idx % self._bg_n if self._bg_n > 0 else self._bg_idx
         try:
             rgb = self._bg.get_data(idx)
@@ -154,6 +241,6 @@ class MuseTalkSession:
         self._bg_idx += 1
         if downscale > 1:
             h, w = rgb.shape[:2]
-            rgb = cv2.resize(rgb, (w // downscale, h // downscale), interpolation=cv2.INTER_AREA)
-            rgb = cv2.resize(rgb, (w, h), interpolation=cv2.INTER_LINEAR)
-        return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            small = cv2.resize(rgb, (w // downscale, h // downscale), interpolation=cv2.INTER_AREA)
+            rgb = cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
+        return rgb

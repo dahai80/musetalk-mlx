@@ -84,6 +84,18 @@ by `tests/test_landmarks.py` independent of the model.
 - [x] Phase 4 (stub): LCMFastSession config stub (disabled; main release uses multi-step DDIM). Distillation training out of scope.
 - [ ] Integration testing: neural core verified (7 integration tests green); #915 fix verified (strict weight load + mel packaging); real-landmark lip-sync parity blocked by fusion-mlx #917 (DWPose output corruption) — see `tests/integration/INTEGRATION_PENDING.md`.
 
+## PRD V1.1-RC2 gap-fill (this release)
+
+- Layered parity tests vs PyTorch (`tests/parity/`): Whisper encoder, VAE encode (cosine >= 0.98), VAE decode (PSNR >= 38dB), 8-ch UNet (cosine >= 0.98). One-time fixture generation in a torch env (`musetalk_mlx/tools/gen_parity_fixtures.py`); comparison at test time is torch-free.
+- Kalman PREDICTION on single-frame landmark miss (FR-END-006): pos+velocity propagation, idle-blink only after 5 consecutive misses; bbox-plausibility + outlier-rejection guards.
+- Full thermal ladder wiring in-session (FR-END-003): step-cut -> frame-reuse(3) -> bg-downscale(2) -> patch 256->128 (never a direct 256->128 jump).
+- Base-video frame preload memory pool (FR-END-002) with streaming fallback.
+- Graph-pass consumption via fusion-mlx `compile_with_custom_pass` (#911), probe-based graceful fallback.
+- Zero-copy frame sink on `MetalZeroCopyBridge.array_to_cvbuffer` (#913) with copy fallback.
+- Per-stage profiler (STFT/Whisper/UNet/VAE/warp/frame-out), phys-footprint memory sampling, max-contiguous-alloc probe (`musetalk_mlx/utils/profiling.py`).
+- Ops tooling: `musetalk-mlx-benchmark` (FPS + per-stage budgets, PRD 9.5) and `musetalk-mlx-stress` (long-session leak <= 50MB + fragmentation probe).
+- Edge-input tests: sub-10ms audio, all-silence, full-scale clipping.
+
 ## fusion-mlx dependency issues
 
 | Issue | Capability | Phase |

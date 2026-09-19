@@ -52,3 +52,18 @@ lip-sync parity remains blocked.
 5. **Edge inputs** — silence / clipping / <10ms: no crash, auto-standby.
 6. **Per-stage benchmark** — STFT/Whisper/UNet/VAE/warp/frame-out timing → FPS, RTT,
    unified-memory, fragmentation, PTS sync, keypoint alerts.
+
+## Layered parity (tests/parity/, PRD V1.1-RC2 thresholds)
+
+Torch-reference fixtures generated once via `musetalk_mlx/tools/gen_parity_fixtures.py`
+(torch CPU env, seed 0); comparison at test time is torch-free. Gated on fixture
+presence (`tests/parity/fixtures/meta.json`).
+
+| Check | Threshold | Status |
+|---|---|---|
+| Whisper encoder stacked hidden states | cosine ≥ 0.98 | fixture + test ready |
+| VAE encode latent (posterior mean) | cosine ≥ 0.98 | fixture + test ready |
+| VAE decode image | PSNR ≥ 38 dB | fixture + test ready |
+| 8-ch UNet predicted latent (t=0, post-PE audio) | cosine ≥ 0.98 | fixture + test ready |
+| DWPose landmarks | n/a | **gated on fusion-mlx #917** |
+| Full-pipeline image (offline end-to-end) | PSNR ≥ 38 / SSIM ≥ 0.95 | gated on #917 |

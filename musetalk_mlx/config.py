@@ -50,8 +50,12 @@ MEM_BUDGET_GB = 4.0
 LEAK_BUDGET_MB = 50.0  # over a 2h session
 
 # Phase 4 (non-blocking): LCM single-step stub. No distillation here — the
-# 1-step weights must be distilled+converted separately; main release uses
+# 1-step weights / distillation are a separate task; main release uses
 # multi-step DDIM (DDIM_STEPS). Flag flips the session to the LCM fast path
 # once fusion-mlx ships compatible 1-step weights.
 LCM_ENABLED = False
 LCM_STEPS = 1
+
+# FR-MLX-003: consume the fusion-mlx #911 graph pass (Conv+GN+SiLU fusion,
+# mx.compile). Auto-degrades to plain ops when fusion-mlx lacks it.
+GRAPH_OPT = True
