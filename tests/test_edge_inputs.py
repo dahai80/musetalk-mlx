@@ -23,6 +23,17 @@ class _StubPipe:
 
         return _m.zeros((1, 8, 32, 32))
 
+    def unet(self, latent, tstep, audio):
+        import mlx.core as _m
+
+        return _m.zeros((latent.shape[0], 4, 32, 32))
+
+    def decode_latents(self, pred):
+        import mlx.core as _m
+
+        n = pred.shape[0]
+        return _m.zeros((n, 256, 256, 3), dtype=_m.uint8)
+
     def generate_faces(self, latent, audio):
         import mlx.core as _m
 

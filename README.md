@@ -86,6 +86,10 @@ by `tests/test_landmarks.py` independent of the model.
 
 ## PRD V1.1-RC2 gap-fill (this release)
 
+- fusion-mlx v0.10.2 verification (#916/#917): real-landmark path green — 10/10 detections, sane bbox; consumer `_FrameSpaceDWPose` workaround removed.
+- Graph-pass consumption fixed: compiles the pure UNet forward (`generate_faces` calls `mx.eval`, illegal under `mx.compile`); output identical to plain (cosine 1.0).
+- fp16 pipeline cast (`config.FP16`) + MuseTalk-realtime-style offline precompute of landmarks/bbox/VAE-latents per base frame (`config.PRECOMPUTE`), removing DWPose + encode from the hot loop.
+
 - Layered parity tests vs PyTorch (`tests/parity/`): Whisper encoder, VAE encode (cosine >= 0.98), VAE decode (PSNR >= 38dB), 8-ch UNet (cosine >= 0.98). One-time fixture generation in a torch env (`musetalk_mlx/tools/gen_parity_fixtures.py`); comparison at test time is torch-free.
 - Kalman PREDICTION on single-frame landmark miss (FR-END-006): pos+velocity propagation, idle-blink only after 5 consecutive misses; bbox-plausibility + outlier-rejection guards.
 - Full thermal ladder wiring in-session (FR-END-003): step-cut -> frame-reuse(3) -> bg-downscale(2) -> patch 256->128 (never a direct 256->128 jump).

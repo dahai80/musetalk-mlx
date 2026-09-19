@@ -5,7 +5,7 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-STAGES = ("stft", "whisper", "unet", "vae", "warp", "frame_out")
+STAGES = ("stft", "whisper", "unet", "vae", "vae_dec", "warp", "frame_out")
 
 
 def phys_footprint() -> int:
@@ -50,6 +50,12 @@ class StageProfiler:
     def end(self) -> None:
         if self._open is None:
             return
+        try:
+            import mlx.core as mx
+
+            mx.eval(mx.zeros((1,)))  # in-order stream: sync pending GPU work
+        except ImportError:
+            pass
         dt = time.perf_counter() - self._t0
         st = self._t.setdefault(self._open, [0, 0.0, 0.0])
         st[0] += 1

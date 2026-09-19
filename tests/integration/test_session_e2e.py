@@ -36,11 +36,37 @@ class _StubLandmarkBackend:
 
 @pytest.fixture(scope="module")
 def session():
-    from musetalk_mlx import MuseTalkSession
+    from musetalk_mlx import MuseTalkSession, config
 
-    s = MuseTalkSession(WEIGHTS, VIDEO, fps=30, mlx_dir=WEIGHTS)
+    old = config.PRECOMPUTE
+    config.PRECOMPUTE = False  # exercise the LIVE tracker path below
+    try:
+        s = MuseTalkSession(WEIGHTS, VIDEO, fps=30, mlx_dir=WEIGHTS)
+    finally:
+        config.PRECOMPUTE = old
     s._tracker = LandmarkTracker(pose_backend=_StubLandmarkBackend())
     return s
+
+
+def test_session_cached_path_skips_tracker(session):
+    # Precompute cache hit: render uses cached (landmarks, bbox, latent);
+    # the live tracker backend is never called.
+    import mlx.core as mx
+
+    if not session._bg_pool:
+        pytest.skip("no bg pool")
+    lm = session._tracker.backend.face_landmarks(session._bg_pool[0])
+    crop, bbox = session._cropper.crop(session._bg_pool[0], lm)
+    lat = session.pipe.get_latents_for_unet(crop)
+    mx.eval(lat)
+    session._bg_cache = [(lm, bbox, lat)] * len(session._bg_pool)
+    calls0 = session._tracker.backend.calls
+    session.push_audio(np.zeros(16000 * 6, dtype=np.float32))
+    out = session.get_output_frame()
+    assert out is not None
+    assert session._tracker.backend.calls == calls0
+    frame, _ = out
+    assert frame.dtype == np.uint8
 
 
 def test_session_renders_generated_frames(session):

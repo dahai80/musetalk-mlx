@@ -26,7 +26,7 @@ class LCMFastSession:
     def generate(self, latent, audio_chunk):
         if not self.enabled:
             return None
-        dtype = getattr(self.pipe, "_dtype", mx.float32)
+        dtype = getattr(self.pipe, "_dtype", None) or mx.float32
         face = self.pipe.generate_faces(latent, mx.array(audio_chunk[None]).astype(dtype))[0]
         log.debug("LCM generate steps=%d", self.steps)
         return face

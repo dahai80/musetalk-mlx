@@ -59,3 +59,11 @@ LCM_STEPS = 1
 # FR-MLX-003: consume the fusion-mlx #911 graph pass (Conv+GN+SiLU fusion,
 # mx.compile). Auto-degrades to plain ops when fusion-mlx lacks it.
 GRAPH_OPT = True
+
+# fp16 pipeline cast (PRD 30FPS + <=4GB unified memory). fp32 batch-1 UNet
+# is ~40ms on M5 Max (over the 33.3ms budget); fp16 is ~33ms.
+FP16 = True
+
+# MuseTalk-realtime-style offline precompute: landmarks + crop bbox + VAE
+# latent per base frame, so the hot loop skips DWPose + encode per frame.
+PRECOMPUTE = True

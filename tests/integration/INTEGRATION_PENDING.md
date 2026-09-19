@@ -6,6 +6,35 @@ packaged). Neural-core integration **verified** (7 passing in
 but **DWPose output is corrupted** (new upstream bug #917), so real-landmark
 lip-sync parity remains blocked.
 
+## v0.10.2 verification (#916/#917 fixed)
+
+- fusion-mlx v0.10.2: DWPose forward matches ONNX ground truth (SPP-stage
+  residual bug); `face_landmarks` returns frame-space coords directly.
+- `_FrameSpaceDWPose` consumer workaround REMOVED (was double-scaling).
+- Real-video verification: 10/10 frames detected, bbox 3.9% of frame area,
+  0 border-pinned coords; tracker fails=0 through a full session.
+- Graph-pass wiring fixed: `generate_faces` calls `mx.eval` (illegal inside
+  mx.compile); session now compiles the pure UNet forward (+PE) and decodes
+  outside. Compiled == plain output (cosine 1.0), no runtime fallback.
+- Offline E2E with real weights + real landmarks: 150-frame video written,
+  no guard fallback.
+
+## Performance (M5 Max, clean GPU, fusion-mlx server + linguakids watchdog stopped)
+
+Component micro-benchmarks (fp16): UNet 32ms, VAE decode 23ms, VAE encode
+(2x) 51ms — components fit the 33ms budget only marginally in total.
+Sustained full-pipeline: 5.8 FPS (was 3.7 before precompute). Gaps:
+
+1. Sustained GPU load degrades MLX small-kernel throughput ~3x vs short
+   benchmarks (boost vs sustained clocks).
+2. Hot-loop DWPose + VAE encode per frame — fixed via offline precompute
+   (config.PRECOMPUTE, ~60s startup for 550 frames, ~9MB latents).
+3. Remaining lever: batched UNet inference (fusion-mlx `run_batched`;
+   batch-2 ≈ 27ms/frame at 54ms latency, fits RTT ≤ 80ms).
+
+NOTE: `com.linguakids.watchdog` (launchd) auto-restarts the fusion-mlx
+server every interval — benchmarks are meaningless while it runs.
+
 ## Verified (tests/integration/, green)
 
 - `test_neural_core.py`:

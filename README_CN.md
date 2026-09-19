@@ -82,6 +82,10 @@ crop。bbox 数学、卡尔曼平滑、守卫与待机逻辑由 `tests/test_land
 
 ## PRD V1.1-RC2 差距补齐（本次发布）
 
+- fusion-mlx v0.10.2 验证（#916/#917）：真实关键点链路全绿 —— 10/10 检出、bbox 合理；消费侧 `_FrameSpaceDWPose` workaround 已移除。
+- 图优化 Pass 接入修复：改为编译纯 UNet 前向（`generate_faces` 内含 `mx.eval`，在 `mx.compile` 中非法）；输出与 plain 一致（cosine 1.0）。
+- fp16 管线转换（`config.FP16`）+ MuseTalk-realtime 式离线预计算（每底片帧缓存 landmarks/bbox/VAE latent，`config.PRECOMPUTE`），热循环移除 DWPose + encode。
+
 - 对 PyTorch 的分层精度 parity 测试（`tests/parity/`）：Whisper 编码器、VAE encode（cosine ≥ 0.98）、VAE decode（PSNR ≥ 38dB）、8 通道 UNet（cosine ≥ 0.98）。fixture 在 torch 环境一次性生成（`musetalk_mlx/tools/gen_parity_fixtures.py`），测试时无 torch 依赖。
 - 单帧关键点丢失走 Kalman 预测（FR-END-006）：位置+速度外推，连续 5 帧丢失才进 idle-blink；含 bbox 合理性 + 离群点剔除守卫。
 - 温控降级阶梯全链路接入 session（FR-END-003）：砍步数 → 帧复用(3) → 背景降采样(2) → patch 256→128（绝不直接 256→128）。
