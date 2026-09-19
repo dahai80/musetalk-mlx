@@ -67,3 +67,7 @@ FP16 = True
 # MuseTalk-realtime-style offline precompute: landmarks + crop bbox + VAE
 # latent per base frame, so the hot loop skips DWPose + encode per frame.
 PRECOMPUTE = True
+
+# Batched hot path: one UNet + one VAE decode per BATCH steps. RTT-safe
+# (BATCH=2 adds one 33ms step; audio-to-video RTT stays <=80ms).
+BATCH = 2

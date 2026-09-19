@@ -80,6 +80,23 @@ crop。bbox 数学、卡尔曼平滑、守卫与待机逻辑由 `tests/test_land
 - [x] Phase 4（桩）：LCMFastSession 配置桩（默认关闭；主版本用多步 DDIM）。蒸馏训练不在本仓库范围。
 - [ ] 集成测试：神经核心已验证（7 个集成测试通过）；#915 修复已验证（权重严格加载 + mel 打包）；真实关键点唇形对齐被 fusion-mlx #917（DWPose 输出损坏）阻塞 — 见 `tests/integration/INTEGRATION_PENDING.md`。
 
+## 性能（M5 Max）
+
+测量前提：fusion-mlx 服务器与其它 GPU 消费者全部停止 —— 后台 GPU 负载会把
+数字抬高数倍（详见 `tests/integration/INTEGRATION_PENDING.md`）。
+
+| 优化 | 效果 |
+|---|---|
+| fp16 转换 + 离线预计算（landmarks/bbox/VAE latent） | DWPose + encode 移出热循环 |
+| UNet+VAE-decode 联合 `mx.compile`（单图） | 每批 2 帧的 round 178ms → 82ms（2.2 倍）；分离编译有 compiled-input 边界开销 |
+| `mx.metal.set_cache_limit(1GB)` + `set_memory_limit(3GB)` | allocator cache 原本涨到 13.5GB、渲染尖峰 >1s；现 p90 304ms，RSS 17GB → 4.2GB |
+| 批 2 热路径（`config.BATCH`） | 每 2 步一次 UNet+decode，RTT 安全（多等一个 33ms 步） |
+
+隔离干净 GPU 微基准（fp16）：UNet+VAE-decode 联合 batch-2 = 82ms/round
+（41ms/帧）。本机持续满载 E2E 低于此值（长期后台 GPU 负载；MLX conv2d kernel
+悬崖，上游 #919 —— VAE 256x256 解码 ~58ms/帧，理论应可达 ~20ms）。30FPS 需要
+上游 kernel 工作（#918/#919）；消费侧上述杠杆已用尽。
+
 ## PRD V1.1-RC2 差距补齐（本次发布）
 
 - fusion-mlx v0.10.2 验证（#916/#917）：真实关键点链路全绿 —— 10/10 检出、bbox 合理；消费侧 `_FrameSpaceDWPose` workaround 已移除。
@@ -109,6 +126,9 @@ crop。bbox 数学、卡尔曼平滑、守卫与待机逻辑由 `tests/test_land
 | [#915](https://github.com/dahai80/fusion-mlx/issues/915) | convert_dwpose/convert_face_parsing 键名不匹配 + mel 资源未打包 | 1/2 |
 | [#916](https://github.com/dahai80/fusion-mlx/issues/916) | DWPose 坐标为网络输入空间而非原始帧空间 | 1 |
 | [#917](https://github.com/dahai80/fusion-mlx/issues/917) | 严格加载通过但 DWPose 输出损坏 | 1 |
+| [#918](https://github.com/dahai80/fusion-mlx/issues/918) | `compile_with_custom_pass` 是空壳（模式从未真正应用） | 3 |
+| [#919](https://github.com/dahai80/fusion-mlx/issues/919) | Metal conv2d fp16 吞吐在不同形状间差距达 8 倍 | 3 |
+| [#920](https://github.com/dahai80/fusion-mlx/issues/920) | 默认 allocator cache 无界增长，渲染出现秒级尖峰 | 3 |
 
 ## 目录结构
 

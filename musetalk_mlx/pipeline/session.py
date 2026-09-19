@@ -60,6 +60,7 @@ class MuseTalkSession:
         self._cropper = FaceCropper()
         self._mask = mask_provider if mask_provider is not None else load_face_parse()
         self._pending = deque()  # (chunk (50,384), pts seconds)
+        self._out_q = deque()  # rendered (frame, pts) awaiting get_output_frame
         self._last_frame = None
         self._reuse = 0
         self._audio_prefix = None  # fusion-mlx #914: prior window's tail embedding
@@ -68,6 +69,7 @@ class MuseTalkSession:
         self._bg_pool = None  # FR-END-002: preloaded base-video frame pool
         self._bg_cache = []  # per-frame (landmarks, bbox, latent) precompute
         self._expected_pts = None  # observability: PTS sync-deviation logging
+        self._tune_mlx_memory()
         self._setup_graph_pass()
         self._preload_bg()
         log.info(
@@ -83,6 +85,18 @@ class MuseTalkSession:
         if mlx_dir is not None:
             return MuseTalkPipeline.from_pretrained_mlx(mlx_dir)
         return MuseTalkPipeline.from_pretrained(weights_dir)
+
+    @staticmethod
+    def _tune_mlx_memory() -> None:
+        # MLX's default cache grows unbounded (measured 13.5GB during the hot
+        # loop), which pushes the allocator into eviction churn: render rounds
+        # spike from ~80ms to >1s. Cap the reuse cache; MLX frees beyond it.
+        try:
+            mx.metal.set_cache_limit(1024 * 1024 * 1024)
+            mx.metal.set_memory_limit(3 * 1024 * 1024 * 1024)
+            log.info("MLX memory tuned: cache<=1GB, limit 3GB")
+        except Exception as e:
+            log.info("MLX memory tuning unavailable (%s); defaults kept", e)
 
     def reload(self, weights_dir=None, mlx_dir=None) -> bool:
         # V2 FR-MLX-006 / FR-END-005: hot-reload weights without dropping audio.
@@ -118,17 +132,97 @@ class MuseTalkSession:
     def get_output_frame(self):
         # Render the next 33ms step. Returns (frame_bgr, pts) or None.
         self._encode_windows()
+        if self._out_q:
+            return self._out_q.popleft()
         if not self._pending:
+            return None
+        tier = thermal_tier()
+        ladder = ladder_for_tier(tier)
+        normal = ladder["frame_reuse"] == 1 and ladder["patch"] == 256 and ladder["bg_downscale"] == 1
+        if config.BATCH > 1 and normal:
+            self._render_batched()
+            if self._out_q:
+                return self._out_q.popleft()
             return None
         chunk, pts = self._pending.popleft()
         frame = self._render(chunk)
+        self._emit(frame, pts)
+        return self._out_q.popleft()
+
+    def _emit(self, frame, pts) -> None:
+        # Single egress point: PTS sync-deviation observability (FR-LK-001).
         self.profiler.tick()
         if self._expected_pts is not None:
             dev = abs(pts - self._expected_pts)
             if dev > 2 * self.step / self.sr:
                 log.warning("PTS sync deviation %.1fms at pts=%.3fs", dev * 1000, pts)
         self._expected_pts = pts + self.step / self.sr
-        return frame, pts
+        self._out_q.append((frame, pts))
+
+    def _render_batched(self) -> None:
+        # Batched hot path (PRD 30FPS): one UNet + one VAE decode per BATCH
+        # steps. RTT-safe: BATCH=2 adds one step (66ms) — within the <=80ms
+        # audio-to-video budget. Cache miss (idle frame / thermal) falls back
+        # to the per-frame path for the whole round (correct, slower).
+        pf = self.profiler
+        n = min(config.BATCH, len(self._pending))
+        items = [self._pending.popleft() for _ in range(n)]
+        frames, latents, chunks, metas = [], [], [], []
+        pf.begin("frame_out")
+        for chunk, pts in items:
+            frame, bg_idx = self._bg_frame()
+            cached = None
+            if self._bg_cache and bg_idx < len(self._bg_cache):
+                cached = self._bg_cache[bg_idx]
+            if cached is None:
+                # cache miss (idle/thermal frame): render this round singly
+                pf.end()
+                self._pending.extendleft(reversed(items))
+                return self._render_all_singly()
+            frames.append(frame)
+            latents.append(cached[2])
+            chunks.append(chunk)
+            metas.append(cached)
+        pf.end()
+        if not latents:
+            return
+        dtype = getattr(self.pipe, "_dtype", None) or mx.float32
+        pf.begin("unet")
+        lat = mx.concatenate(latents, 0)
+        ch = mx.concatenate([mx.array(c[None]) for c in chunks], 0).astype(dtype)
+        faces = None
+        if self._compiled_generate is not None:
+            try:
+                # joint UNet+VAE-decode graph; output is RGB [0,1] (B,3,256,256)
+                img = self._compiled_generate(lat, ch)
+            except Exception as e:
+                log.warning("compiled batched render failed (%s); plain batch", e)
+                self._compiled_generate = None
+            else:
+                pf.end()
+                pf.begin("vae_dec")
+                faces = self._decode_faces(img)
+                pf.end()
+        if faces is None:
+            from fusion_mlx.video.musetalk_mlx.config import UNET_TIMESTEP
+            from fusion_mlx.video.musetalk_mlx.whisper.audio2feature import apply_pe
+
+            pred = self.pipe.unet(lat, mx.array([UNET_TIMESTEP]), apply_pe(ch))
+            pf.end()
+            pf.begin("vae_dec")
+            faces = self.pipe.decode_latents(pred)
+            pf.end()
+        for i, meta in enumerate(metas):
+            pf.begin("warp")
+            out = paste_back(frames[i], faces[i], meta[1], mask_provider=self._mask)
+            pf.end()
+            self._last_frame = out
+            self._emit(out, items[i][1])
+
+    def _render_all_singly(self) -> None:
+        while self._pending:
+            chunk, pts = self._pending.popleft()
+            self._emit(self._render(chunk), pts)
 
     def _encode_windows(self) -> None:
         # Drain every fully-buffered overlapping 5s window into per-step chunks.
@@ -192,21 +286,25 @@ class MuseTalkSession:
             latent = self.pipe.get_latents_for_unet(crop)
             pf.end()
         pf.begin("unet")
-        pf.begin("unet")
-        pred = None
+        face = None
         if self._compiled_generate is not None:
             try:
                 dtype = getattr(self.pipe, "_dtype", None) or mx.float32
-                pred = self._compiled_generate(latent, mx.array(chunk[None]).astype(dtype))
+                img = self._compiled_generate(latent, mx.array(chunk[None]).astype(dtype))
             except Exception as e:
-                log.warning("compiled generate failed (%s); plain path", e)
+                log.warning("compiled render failed (%s); plain path", e)
                 self._compiled_generate = None
-        if pred is None:
+            else:
+                pf.end()
+                pf.begin("vae_dec")
+                face = self._decode_faces(img)[0]
+                pf.end()
+        if face is None:
             pred = _unet_forward(self.pipe, latent, chunk)
-        pf.end()
-        pf.begin("vae_dec")
-        face = self.pipe.decode_latents(pred)[0]
-        pf.end()
+            pf.end()
+            pf.begin("vae_dec")
+            face = self.pipe.decode_latents(pred)[0]
+            pf.end()
         pf.begin("warp")
         out = paste_back(frame, face, bbox, mask_provider=self._mask)
         pf.end()
@@ -219,11 +317,18 @@ class MuseTalkSession:
             setter(steps)
             log.debug("ddim steps set to %d", steps)
 
+    def _decode_faces(self, img) -> np.ndarray:
+        # Compiled-joint path output: RGB float [0,1] (B,3,256,256) -> BGR
+        # uint8, same contract as pipe.decode_latents.
+        arr = np.array(img.transpose(0, 2, 3, 1).astype(mx.float32))
+        return ((arr * 255).round().astype(np.uint8))[..., ::-1]
+
     def _setup_graph_pass(self) -> None:
         # FR-MLX-003: consume the fusion-mlx #911 graph pass (Conv+GN+SiLU
-        # fusion) when available. Wrap the pure UNet forward (PE applied
-        # inside, mirroring generate_faces). generate_faces itself calls
-        # mx.eval, which is illegal inside an mx.compile transformation.
+        # fusion) when available. Compiles the joint UNet+VAE-decode forward
+        # (PE applied inside, mirroring generate_faces; generate_faces itself
+        # calls mx.eval, illegal under mx.compile). One graph for unet->decode
+        # is ~2x faster than two compiled calls (no compiled-input boundary).
         self._compiled_generate = None
         if not config.GRAPH_OPT:
             log.info("graph pass disabled by config flag")
@@ -235,11 +340,12 @@ class MuseTalkSession:
 
             pipe = self.pipe
 
-            def unet_fn(latent, audio):
-                return pipe.unet(latent, mx.array([UNET_TIMESTEP]), apply_pe(audio))
+            def render_fn(latent, audio):
+                pred = pipe.unet(latent, mx.array([UNET_TIMESTEP]), apply_pe(audio))
+                return mx.clip(pipe.vae.decode(pred / pipe.scaling_factor) / 2 + 0.5, 0, 1)
 
-            self._compiled_generate = compile_with_custom_pass(unet_fn)
-            log.info("fusion-mlx graph pass applied to UNet forward (#911)")
+            self._compiled_generate = compile_with_custom_pass(render_fn)
+            log.info("fusion-mlx graph pass applied to joint UNet+decode (#911)")
         except Exception as e:
             self._compiled_generate = None
             log.info("graph pass unavailable (%s); plain generate_faces", e)

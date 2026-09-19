@@ -21,16 +21,39 @@ lip-sync parity remains blocked.
 
 ## Performance (M5 Max, clean GPU, fusion-mlx server + linguakids watchdog stopped)
 
-Component micro-benchmarks (fp16): UNet 32ms, VAE decode 23ms, VAE encode
-(2x) 51ms — components fit the 33ms budget only marginally in total.
-Sustained full-pipeline: 5.8 FPS (was 3.7 before precompute). Gaps:
+Methodology: background GPU load inflates every number several-fold. Before
+measuring: `~/fusion/fusion-mlx/start.sh stop`,
+`launchctl bootout gui/$(id -u)/com.linguakids.watchdog`, and check
+`ioreg -l | grep '"Device Utilization %"'` ≈ 0. Other Claude sessions spawn
+`fusion_mlx.media.image_worker` / `fusion-mlx-server` on demand — verify with
+`ps aux` between runs.
 
-1. Sustained GPU load degrades MLX small-kernel throughput ~3x vs short
-   benchmarks (boost vs sustained clocks).
-2. Hot-loop DWPose + VAE encode per frame — fixed via offline precompute
-   (config.PRECOMPUTE, ~60s startup for 550 frames, ~9MB latents).
-3. Remaining lever: batched UNet inference (fusion-mlx `run_batched`;
-   batch-2 ≈ 27ms/frame at 54ms latency, fits RTT ≤ 80ms).
+Component micro-benchmarks (fp16, clean GPU, fresh process):
+
+| Path | Time |
+|---|---|
+| UNet compiled b1 / b2 | 29.4ms / 46.7ms (23.4ms/frame) |
+| VAE decode plain b2 | 131ms (65.6ms/frame) |
+| VAE decode compiled b2 | 115ms (57.6ms/frame) |
+| **Joint UNet+decode compiled b2 (one graph)** | **82.1ms (41.0ms/frame)** |
+| Split compiled UNet then compiled decode b2 | 162ms — compiled-input boundary penalty, do not use |
+
+Same-process A/B (session hot loop): split 178ms/round → joint 82ms/round
+(2.2x). Sustained-load same-process standalone: 145-210ms/round (clock
+degradation + background contention), session p50 145-165ms/round.
+
+Memory: MLX default allocator cache grew to 13.55GB during the hot loop with
+render spikes p90 >1.2s; `set_cache_limit(1GB)` + `set_memory_limit(3GB)`
+(`session._tune_mlx_memory`) → cache 0.91GB, spikes p90 304ms, RSS 17GB →
+4.2GB (PRD ≤4GB essentially met).
+
+Current E2E sustained: ~8 FPS under chronic background GPU load (5
+consecutive retries 7.5-8.0); a clean-window number was not obtainable during
+this session. To hit 30FPS the remaining gap is upstream: conv2d kernel
+cliffs (#919 — VAE decode 58ms/frame where ~20ms is reachable) and the
+no-op graph pass (#918). Consumer-side levers (fp16, precompute, batch-2,
+joint compile, memory caps, im2col-GEMM shim — the last one measured 7x
+WORSE in-graph and was rejected) are exhausted.
 
 NOTE: `com.linguakids.watchdog` (launchd) auto-restarts the fusion-mlx
 server every interval — benchmarks are meaningless while it runs.

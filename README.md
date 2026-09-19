@@ -84,6 +84,26 @@ by `tests/test_landmarks.py` independent of the model.
 - [x] Phase 4 (stub): LCMFastSession config stub (disabled; main release uses multi-step DDIM). Distillation training out of scope.
 - [ ] Integration testing: neural core verified (7 integration tests green); #915 fix verified (strict weight load + mel packaging); real-landmark lip-sync parity blocked by fusion-mlx #917 (DWPose output corruption) — see `tests/integration/INTEGRATION_PENDING.md`.
 
+## Performance (M5 Max)
+
+Measured with the fusion-mlx server and any other GPU consumers stopped —
+background GPU load inflates numbers several-fold (see
+`tests/integration/INTEGRATION_PENDING.md`).
+
+| Optimization | Effect |
+|---|---|
+| fp16 cast + offline precompute (landmarks/bbox/VAE latent) | DWPose + encode out of the hot loop |
+| Joint `mx.compile` of UNet+VAE-decode (one graph) | 178ms → 82ms per batch-2 round (2.2x); split compiled calls pay a compiled-input boundary penalty |
+| `mx.metal.set_cache_limit(1GB)` + `set_memory_limit(3GB)` | allocator cache was growing to 13.5GB, causing >1s render spikes; now p90 304ms, RSS 17GB → 4.2GB |
+| Batch-2 hot path (`config.BATCH`) | one UNet+decode per 2 steps, RTT-safe (adds one 33ms step) |
+
+Isolated clean-GPU microbenchmarks (fp16): joint UNet+VAE-decode batch-2 =
+82ms/round (41ms/frame). Sustained full-session E2E on this machine is lower
+(chronic background GPU load; MLX conv2d kernel cliffs, upstream #919 — VAE
+decode at 256x256 runs ~58ms/frame where ~20ms should be reachable). 30FPS
+needs the upstream kernel work (#918/#919); the consumer-side levers above are
+exhausted.
+
 ## PRD V1.1-RC2 gap-fill (this release)
 
 - fusion-mlx v0.10.2 verification (#916/#917): real-landmark path green — 10/10 detections, sane bbox; consumer `_FrameSpaceDWPose` workaround removed.
@@ -113,6 +133,9 @@ by `tests/test_landmarks.py` independent of the model.
 | [#915](https://github.com/dahai80/fusion-mlx/issues/915) | convert_dwpose/convert_face_parsing key mismatch + mel asset packaging | 1/2 |
 | [#916](https://github.com/dahai80/fusion-mlx/issues/916) | DWPose coords in network-input space, not frame space | 1 |
 | [#917](https://github.com/dahai80/fusion-mlx/issues/917) | DWPose output corrupted despite strict load | 1 |
+| [#918](https://github.com/dahai80/fusion-mlx/issues/918) | `compile_with_custom_pass` is a no-op stub (patterns never applied) | 3 |
+| [#919](https://github.com/dahai80/fusion-mlx/issues/919) | Metal conv2d fp16 throughput cliffs up to 8x between shapes | 3 |
+| [#920](https://github.com/dahai80/fusion-mlx/issues/920) | Default allocator cache grows unbounded, multi-second render spikes | 3 |
 
 ## Layout
 
