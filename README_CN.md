@@ -66,10 +66,11 @@ weights/
 单帧检测丢失则保持上一帧姿态，连续 `KEYPOINT_FAIL_IDLE` 帧丢失进入待机眨眼
 （原样输出底片帧）。
 
-MLX DWPose/RTMPose 推理后端**尚未在 fusion-mlx 中提供**（已在 dahai80/fusion-mlx
-提 issue 跟踪）。`load_dwpose_backend()` 探测 `fusion_mlx.video.dwpose`，缺失时回退
-待机眨眼，保证管线可运行。bbox 数学、卡尔曼平滑与待机逻辑由 `tests/test_landmarks.py`
-覆盖，不依赖模型。
+MLX DWPose/RTMPose 后端已随 fusion-mlx 提供，但其解码关键点当前损坏（上游 #917），
+且坐标在网络输入空间（#916 — 本地已重缩放）。`load_dwpose_backend()` 包一层坐标
+换算，`LandmarkTracker` 的 bbox 合理性守卫在异常时降级为待机眨眼，避免产出坏
+crop。bbox 数学、卡尔曼平滑、守卫与待机逻辑由 `tests/test_landmarks.py` 覆盖，
+不依赖模型。
 
 ## 阶段状态
 
@@ -77,7 +78,7 @@ MLX DWPose/RTMPose 推理后端**尚未在 fusion-mlx 中提供**（已在 dahai
 - [x] Phase 2（业务层）：重叠音频滑窗（前缀平滑）、生产级融合贴回 + 可插拔 face-parse 掩码、零拷贝帧汇（拷贝兜底）、离线 Demo 打磨。embedding 级前缀缓存待 fusion-mlx #914；face-parse 模型待 #910；真零拷贝待 #913。
 - [x] Phase 3（业务层）：完整温控降级阶梯（FR-END-003）、ReloadModel 热重载（FR-MLX-006）、LiveKit 实时适配器（FR-LK-001/002，音频继承 PTS，双向音频）、实时运行 CLI。图优化 + ICB 性能待 fusion-mlx #911/#912。
 - [x] Phase 4（桩）：LCMFastSession 配置桩（默认关闭；主版本用多步 DDIM）。蒸馏训练不在本仓库范围。
-- [ ] 集成测试：神经核心已验证（7 个集成测试通过）；DWPose/face-parse 权重加载被 fusion-mlx #915 阻塞 — 见 `tests/integration/INTEGRATION_PENDING.md`。
+- [ ] 集成测试：神经核心已验证（7 个集成测试通过）；#915 修复已验证（权重严格加载 + mel 打包）；真实关键点唇形对齐被 fusion-mlx #917（DWPose 输出损坏）阻塞 — 见 `tests/integration/INTEGRATION_PENDING.md`。
 
 ## fusion-mlx 依赖 issue
 
@@ -90,6 +91,8 @@ MLX DWPose/RTMPose 推理后端**尚未在 fusion-mlx 中提供**（已在 dahai
 | [#913](https://github.com/dahai80/fusion-mlx/issues/913) | IOSurface↔CVPixelBuffer 零拷贝 | 3 |
 | [#914](https://github.com/dahai80/fusion-mlx/issues/914) | encode_audio 前缀上下文缓存 | 2 |
 | [#915](https://github.com/dahai80/fusion-mlx/issues/915) | convert_dwpose/convert_face_parsing 键名不匹配 + mel 资源未打包 | 1/2 |
+| [#916](https://github.com/dahai80/fusion-mlx/issues/916) | DWPose 坐标为网络输入空间而非原始帧空间 | 1 |
+| [#917](https://github.com/dahai80/fusion-mlx/issues/917) | 严格加载通过但 DWPose 输出损坏 | 1 |
 
 ## 目录结构
 

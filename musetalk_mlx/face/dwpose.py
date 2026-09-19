@@ -37,11 +37,32 @@ def derive_face_bbox(face_lm: np.ndarray, upperbondrange: int = 0):
     return (x1, y1, x2, y2)
 
 
+class _FrameSpaceDWPose:
+    # fusion-mlx DWPose.face_landmarks returns coords in its 288x384 network
+    # input space; MuseTalk crop math (derive_face_bbox) needs original-frame
+    # coords. Rescale linearly (preprocess is a plain resize, no letterbox).
+    # Upstream gap tracked on dahai80/fusion-mlx (coord-space issue).
+    _INPUT_W = 288
+    _INPUT_H = 384
+
+    def __init__(self, backend):
+        self.backend = backend
+
+    def face_landmarks(self, frame_bgr):
+        lm = self.backend.face_landmarks(frame_bgr)
+        if lm is None:
+            return None
+        h, w = frame_bgr.shape[:2]
+        out = np.asarray(lm, dtype=np.float32).copy()
+        out[:, 0] *= w / self._INPUT_W
+        out[:, 1] *= h / self._INPUT_H
+        return out
+
+
 def load_dwpose_backend():
     # Load the DWPose MLX backend from fusion-mlx if available.
-    # fusion-mlx does not yet ship DWPose/RTMPose (tracked as an issue on
-    # dahai80/fusion-mlx). Returns None until then -> LandmarkTracker falls
-    # back to idle-blink, keeping the pipeline runnable.
+    # Returns None on failure -> LandmarkTracker falls back to idle-blink,
+    # keeping the pipeline runnable.
     try:
         from fusion_mlx.video.dwpose import DWPose
     except ImportError:
@@ -52,7 +73,7 @@ def load_dwpose_backend():
         return None
     # API shape is settled by the fusion-mlx DWPose issue; instantiate lazily.
     try:
-        return DWPose.from_pretrained()
+        return _FrameSpaceDWPose(DWPose.from_pretrained())
     except Exception as e:  # API drift guard
         log.warning("DWPose backend init failed (%s); falling back to idle-blink", e)
         return None

@@ -1,8 +1,10 @@
 # Integration tests
 
-fusion-mlx v0.10.0 landed #909–#914. Neural-core integration is **verified**
-(7 passing in `tests/integration/`); DWPose/face-parse **model weight loading
-is blocked** by a fusion-mlx convert-script + packaging bug (#915).
+fusion-mlx v0.10.1 fixed #915 (strict-load key mismatch, `mel_filters_80.npy`
+packaged). Neural-core integration **verified** (7 passing in
+`tests/integration/`); DWPose/face-parse weights now load strict-verified —
+but **DWPose output is corrupted** (new upstream bug #917), so real-landmark
+lip-sync parity remains blocked.
 
 ## Verified (tests/integration/, green)
 
@@ -15,18 +17,29 @@ is blocked** by a fusion-mlx convert-script + packaging bug (#915).
     stub landmark backend (DWPose blocked — see below).
   - Audio-inherited PTS, monotonic, never system clock (FR-LK-001).
   - `NumpyFrameSink` receives frames + PTS.
-- Offline CLI: `musetalk-mlx-offline --mlx-dir /tmp/mtlk_mlx_dist ...` writes a
-  valid 30fps mp4 (30 frames, 768×576, std 60.96 — real content).
+- Offline CLI with real v0.10.1 weights: runs clean, 60 frames @30fps; DWPose
+  detections route through the bbox sanity guard → idle-blink fallback (no
+  broken crops from the corrupted backend — see #917).
+- Face-parse (#910) verified with real 79999_iter weights: sane 19-class labels
+  (skin/lips/hair counts plausible) on a real face crop.
 
-## Blocked — fusion-mlx #915
+## #915 fix verified (v0.10.1)
+
+- `convert_dwpose.py` / `convert_face_parsing.py` remap + transpose to the MLX
+  param tree; both converters print `(strict OK)`.
+- `mel_filters_80.npy` packaged in the wheel.
+- Note: source `.pth` checkpoints in legacy tar format need `weights_only=False`
+  (mmpose/resnet18 files); converters use `weights_only=True` — worked around by
+  patching `torch.load` at conversion time (upstream follow-up candidate).
+
+## Blocked — fusion-mlx #917 (DWPose output corruption)
 
 | Subsystem | Status |
 |---|---|
-| DWPose (#909) | code landed; **weights fail to load** — `convert_dwpose.py` dumps raw mmpose keys (`backbone.stem.2.bn.*`, `head.gau.*`) but `DWPoseMLX` expects `backbone.stem.layers.*` → silently untrained → `LandmarkTracker` idle-blink fallback. Parity vs torch reference not yet measurable. |
-| Face-parsing (#910) | code landed; **weights fail to load** — `convert_face_parsing.py` dumps raw resnet18 keys (`layer4.1.conv2.*`) but `BiSeNetMLX` expects `spatial.b1.conv.*` → feather-mask fallback. |
-| `mel_filters_80.npy` | **not packaged in wheel** — `log_mel_spectrogram` FileNotFoundError from `site-packages`; worked around by manual asset copy for this run. |
+| DWPose (#909) | weights load strict-OK; **decoded landmarks are garbage** — mouth cluster std (60,92) px, border-pinned coords (x=0/254/384), bbox covers 75% of frame. `LandmarkTracker` bbox sanity guard routes to idle-blink. |
+| Face-parsing (#910) | **working** — real 79999_iter weights, sane labels. |
 
-## Scenarios to run once #915 is fixed
+## Scenarios to run once #917 is fixed
 
 1. **Offline end-to-end parity** — `musetalk-mlx-offline` against MuseTalk torch
    reference: image PSNR ≥ 38 dB, SSIM ≥ 0.95 (PRD V2); manual lip-quality review.

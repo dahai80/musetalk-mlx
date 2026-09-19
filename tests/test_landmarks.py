@@ -108,3 +108,30 @@ def test_cropper_center_fallback():
     assert patch.shape == (config.PATCH, config.PATCH, 3)
     _, _, w, h = bbox
     assert w == h == 480
+
+
+def test_tracker_implausible_bbox_treated_as_miss():
+    # Corrupted backend (majority of coords border-pinned, like the fusion-mlx
+    # #917 DWPose output corruption) must route to the miss path, not produce a
+    # frame-wide broken crop. Median-based outlier rejection cannot rescue a
+    # majority-corrupted set.
+    class _GarbageBackend:
+        def face_landmarks(self, frame_bgr):
+            lm = _synth_face()
+            h, w = frame_bgr.shape[:2]
+            lm[::2] = (w - 1, h - 1)  # 34 pts pinned to bottom-right corner
+            return lm
+
+    t = LandmarkTracker(pose_backend=_GarbageBackend())
+    frame = np.zeros((240, 320, 3), dtype=np.uint8)
+    for _ in range(config.KEYPOINT_FAIL_IDLE):
+        t.update(frame)
+    assert t.idle
+
+
+def test_tracker_plausible_bbox_normal():
+    t = LandmarkTracker(pose_backend=_FixedBackend())
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    out = t.update(frame)
+    assert out is not None
+    assert not t.idle

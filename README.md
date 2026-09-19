@@ -69,11 +69,12 @@ smoothed with a vectorized constant-velocity Kalman filter; a single-frame
 detection miss holds the last pose, `KEYPOINT_FAIL_IDLE` consecutive misses
 trigger idle-blink (emit the base frame unchanged).
 
-The MLX DWPose/RTMPose inference backend is **not yet in fusion-mlx**
-(tracked as an issue on `dahai80/fusion-mlx`). `load_dwpose_backend()` probes
-`fusion_mlx.video.dwpose` and falls back to idle-blink when absent, so the
-pipeline stays runnable. The bbox math, Kalman smoother, and idle logic are
-covered by `tests/test_landmarks.py` independent of the model.
+The MLX DWPose/RTMPose backend ships in fusion-mlx, but its decoded landmarks
+are currently corrupted (upstream #917) and returned in network-input space
+(#916 — rescaled locally). `load_dwpose_backend()` wraps the backend and a bbox
+sanity guard in `LandmarkTracker` degrades to idle-blink instead of producing
+broken crops. The bbox math, Kalman smoother, guard, and idle logic are covered
+by `tests/test_landmarks.py` independent of the model.
 
 ## Phase status
 
@@ -81,7 +82,7 @@ covered by `tests/test_landmarks.py` independent of the model.
 - [x] Phase 2 (business layer): overlapping audio windower (prefix-smoothing), production blend paste-back + pluggable face-parse mask, zero-copy frame sink (copy fallback), offline demo polish. Embedding-level prefix cache pending fusion-mlx #914; face-parse model pending #910; true zero-copy pending #913.
 - [x] Phase 3 (business layer): full thermal degradation ladder (FR-END-003), ReloadModel hot-reload (FR-MLX-006), LiveKit realtime adapter (FR-LK-001/002, audio-inherited PTS, bidirectional audio), realtime runner CLI. Graph pass + ICB perf pending fusion-mlx #911/#912.
 - [x] Phase 4 (stub): LCMFastSession config stub (disabled; main release uses multi-step DDIM). Distillation training out of scope.
-- [ ] Integration testing: neural core verified (7 integration tests green); DWPose/face-parse weight loading blocked by fusion-mlx #915 — see `tests/integration/INTEGRATION_PENDING.md`.
+- [ ] Integration testing: neural core verified (7 integration tests green); #915 fix verified (strict weight load + mel packaging); real-landmark lip-sync parity blocked by fusion-mlx #917 (DWPose output corruption) — see `tests/integration/INTEGRATION_PENDING.md`.
 
 ## fusion-mlx dependency issues
 
@@ -94,6 +95,8 @@ covered by `tests/test_landmarks.py` independent of the model.
 | [#913](https://github.com/dahai80/fusion-mlx/issues/913) | IOSurface↔CVPixelBuffer zero-copy | 3 |
 | [#914](https://github.com/dahai80/fusion-mlx/issues/914) | encode_audio prefix-context cache | 2 |
 | [#915](https://github.com/dahai80/fusion-mlx/issues/915) | convert_dwpose/convert_face_parsing key mismatch + mel asset packaging | 1/2 |
+| [#916](https://github.com/dahai80/fusion-mlx/issues/916) | DWPose coords in network-input space, not frame space | 1 |
+| [#917](https://github.com/dahai80/fusion-mlx/issues/917) | DWPose output corrupted despite strict load | 1 |
 
 ## Layout
 
