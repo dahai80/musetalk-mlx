@@ -126,9 +126,9 @@ crop。bbox 数学、卡尔曼平滑、守卫与待机逻辑由 `tests/test_land
 | [#915](https://github.com/dahai80/fusion-mlx/issues/915) | convert_dwpose/convert_face_parsing 键名不匹配 + mel 资源未打包 | 1/2 |
 | [#916](https://github.com/dahai80/fusion-mlx/issues/916) | DWPose 坐标为网络输入空间而非原始帧空间 | 1 |
 | [#917](https://github.com/dahai80/fusion-mlx/issues/917) | 严格加载通过但 DWPose 输出损坏 | 1 |
-| [#918](https://github.com/dahai80/fusion-mlx/issues/918) | `compile_with_custom_pass` 是空壳（模式从未真正应用） | 3 |
-| [#919](https://github.com/dahai80/fusion-mlx/issues/919) | Metal conv2d fp16 吞吐在不同形状间差距达 8 倍 | 3 |
-| [#920](https://github.com/dahai80/fusion-mlx/issues/920) | 默认 allocator cache 无界增长，渲染出现秒级尖峰 | 3 |
+| [#918](https://github.com/dahai80/fusion-mlx/issues/918) | `compile_with_custom_pass` 是空壳 — **v0.10.3 已修；musetalk 拓扑匹配 0 处** | 3 |
+| [#919](https://github.com/dahai80/fusion-mlx/issues/919) | Metal conv2d fp16 吞吐悬崖 — **v0.10.3 已修；SmartConv2d 数值正确但图内慢 1.5×，默认关** | 3 |
+| [#920](https://github.com/dahai80/fusion-mlx/issues/920) | 默认 allocator cache 无界增长 — **v0.10.3 已修** | 3 |
 
 ## 目录结构
 

@@ -60,6 +60,13 @@ LCM_STEPS = 1
 # mx.compile). Auto-degrades to plain ops when fusion-mlx lacks it.
 GRAPH_OPT = True
 
+# fusion-mlx #919 SmartConv2d (shape-dispatched im2col GEMM). Correct
+# (parity clean) but measured 1.5x SLOWER inside the joint compiled
+# UNet+decode graph on M5 Max (103.4ms -> 157.0ms p50): the microbench win
+# at cliff shapes does not survive in-graph allocator traffic. Off by
+# default; revisit per fusion-mlx release.
+SMART_CONV = False
+
 # fp16 pipeline cast (PRD 30FPS + <=4GB unified memory). fp32 batch-1 UNet
 # is ~40ms on M5 Max (over the 33.3ms budget); fp16 is ~33ms.
 FP16 = True

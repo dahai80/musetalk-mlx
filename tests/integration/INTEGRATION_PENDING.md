@@ -19,6 +19,27 @@ lip-sync parity remains blocked.
 - Offline E2E with real weights + real landmarks: 150-frame video written,
   no guard fallback.
 
+## v0.10.3 verification (#918/#919/#920)
+
+- **#920 (allocator cache)**: verified. `tune_mlx_memory()` runs in both
+  `from_pretrained*` paths (env-overridable); consumer-side caps remain in
+  `session._tune_mlx_memory` (new `mx.set_cache_limit` API, deprecated
+  `mx.metal` spelling as fallback). RSS stays ~4.2GB in the hot loop.
+- **#918 (graph pass)**: verified honest. `compile_with_custom_pass` now logs
+  that a bare wrapper is plain mx.compile; the real rewrite is
+  `apply_patterns(root)`. Wired into `session._setup_graph_pass` (after fp16
+  cast, before compile). On musetalk topology it matches 0 sites — resnets
+  are `norm -> silu -> conv` and the pattern needs `conv -> norm -> silu`
+  sibling adjacency — harmless by design.
+- **#919 (SmartConv2d)**: verified correct, gated OFF. Parity clean after
+  wrapping (UNet cosine 0.9996, VAE decode PSNR 67.4dB). But the microbench
+  win does not survive in-graph: same-process A/B, joint compiled
+  UNet+decode b2 p50 103.4ms plain vs 157.0ms with patterns+SmartConv (1.5x
+  SLOWER — in-graph allocator traffic kills the im2col GEMM advantage,
+  matching the earlier consumer-side shim finding). `config.SMART_CONV`
+  gates it (default False); revisit per fusion-mlx release.
+- 60/60 pytest green; parity thresholds all pass after rewrites.
+
 ## Performance (M5 Max, clean GPU, fusion-mlx server + linguakids watchdog stopped)
 
 Methodology: background GPU load inflates every number several-fold. Before

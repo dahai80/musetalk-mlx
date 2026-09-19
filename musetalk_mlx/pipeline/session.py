@@ -91,9 +91,20 @@ class MuseTalkSession:
         # MLX's default cache grows unbounded (measured 13.5GB during the hot
         # loop), which pushes the allocator into eviction churn: render rounds
         # spike from ~80ms to >1s. Cap the reuse cache; MLX frees beyond it.
+        # fusion-mlx #920 does the same in from_pretrained_* (env-overridable);
+        # this covers sessions built on a preloaded pipe. New API first, the
+        # mx.metal spelling is deprecated since MLX 0.32.
+        setter = getattr(mx, "set_cache_limit", None) or getattr(
+            getattr(mx, "metal", None), "set_cache_limit", None
+        )
+        limiter = getattr(mx, "set_memory_limit", None) or getattr(
+            getattr(mx, "metal", None), "set_memory_limit", None
+        )
         try:
-            mx.metal.set_cache_limit(1024 * 1024 * 1024)
-            mx.metal.set_memory_limit(3 * 1024 * 1024 * 1024)
+            if setter is not None:
+                setter(1024 * 1024 * 1024)
+            if limiter is not None:
+                limiter(3 * 1024 * 1024 * 1024)
             log.info("MLX memory tuned: cache<=1GB, limit 3GB")
         except Exception as e:
             log.info("MLX memory tuning unavailable (%s); defaults kept", e)
@@ -324,20 +335,27 @@ class MuseTalkSession:
         return ((arr * 255).round().astype(np.uint8))[..., ::-1]
 
     def _setup_graph_pass(self) -> None:
-        # FR-MLX-003: consume the fusion-mlx #911 graph pass (Conv+GN+SiLU
-        # fusion) when available. Compiles the joint UNet+VAE-decode forward
-        # (PE applied inside, mirroring generate_faces; generate_faces itself
-        # calls mx.eval, illegal under mx.compile). One graph for unet->decode
-        # is ~2x faster than two compiled calls (no compiled-input boundary).
+        # FR-MLX-003: consume the fusion-mlx #911/#918 graph passes when
+        # available: structural rewrite (Conv+GN+SiLU fusion) + SmartConv2d
+        # shape-dispatched conv (#919) on the module tree, then compile the
+        # joint UNet+VAE-decode forward (PE applied inside, mirroring
+        # generate_faces; generate_faces itself calls mx.eval, illegal under
+        # mx.compile). One graph for unet->decode is ~2x faster than two
+        # compiled calls (no compiled-input boundary).
         self._compiled_generate = None
         if not config.GRAPH_OPT:
             log.info("graph pass disabled by config flag")
             return
         try:
-            from fusion_mlx.graph_opt import compile_with_custom_pass
+            from fusion_mlx.graph_opt import apply_patterns, apply_smart_conv, compile_with_custom_pass
             from fusion_mlx.video.musetalk_mlx.config import UNET_TIMESTEP
             from fusion_mlx.video.musetalk_mlx.whisper.audio2feature import apply_pe
 
+            n_pat = apply_patterns(self.pipe.unet) + apply_patterns(self.pipe.vae)
+            n_sc = 0
+            if config.SMART_CONV:
+                n_sc = apply_smart_conv(self.pipe.unet) + apply_smart_conv(self.pipe.vae)
+            log.info("graph passes: %d pattern rewrites, %d smart convs", n_pat, n_sc)
             pipe = self.pipe
 
             def render_fn(latent, audio):
@@ -345,7 +363,7 @@ class MuseTalkSession:
                 return mx.clip(pipe.vae.decode(pred / pipe.scaling_factor) / 2 + 0.5, 0, 1)
 
             self._compiled_generate = compile_with_custom_pass(render_fn)
-            log.info("fusion-mlx graph pass applied to joint UNet+decode (#911)")
+            log.info("fusion-mlx graph pass applied to joint UNet+decode (#911/#918)")
         except Exception as e:
             self._compiled_generate = None
             log.info("graph pass unavailable (%s); plain generate_faces", e)
