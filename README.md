@@ -97,12 +97,12 @@ background GPU load inflates numbers several-fold (see
 | `mx.metal.set_cache_limit(1GB)` + `set_memory_limit(3GB)` | allocator cache was growing to 13.5GB, causing >1s render spikes; now p90 304ms, RSS 17GB → 4.2GB |
 | Batch-2 hot path (`config.BATCH`) | one UNet+decode per 2 steps, RTT-safe (adds one 33ms step) |
 
-Isolated clean-GPU microbenchmarks (fp16): joint UNet+VAE-decode batch-2 =
-82ms/round (41ms/frame). Sustained full-session E2E on this machine is lower
-(chronic background GPU load; MLX conv2d kernel cliffs, upstream #919 — VAE
-decode at 256x256 runs ~58ms/frame where ~20ms should be reachable). 30FPS
-needs the upstream kernel work (#918/#919); the consumer-side levers above are
-exhausted.
+Isolated clean-GPU microbenchmarks (fp16, v0.10.4): joint UNet+VAE-decode
+batch-2 = 89.3ms/round (44.6ms/frame, 22.4 FPS). VAE decode = 25.2ms/frame,
+UNet = 19.0ms/frame. The earlier "58ms decode / 8 FPS sustained" figures were
+contention-contaminated (linguakids watchdog auto-restarting the fusion-mlx
+server) and are retracted. 30FPS gap is now ~23ms/round of ordinary headroom,
+not a kernel cliff.
 
 ## PRD V1.1-RC2 gap-fill (this release)
 

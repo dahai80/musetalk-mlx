@@ -40,6 +40,34 @@ lip-sync parity remains blocked.
   gates it (default False); revisit per fusion-mlx release.
 - 60/60 pytest green; parity thresholds all pass after rewrites.
 
+## v0.10.4 verification (#919 autotune) + perf correction
+
+**Correction:** the v0.10.3 "58ms/frame VAE decode" baseline (and the
+#921 filing built on it) was **contention-contaminated** — measured while
+`com.linguakids.watchdog` auto-restarted the fusion-mlx server. Re-measured
+on v0.10.4 / MLX 0.32.2 with the GPU verified clean (Device Utilization 0%,
+no fusion-mlx/watchdog/image_worker procs, fresh process):
+
+| Path | b2 round | per-frame |
+|---|---|---|
+| VAE decode plain | 50.4 ms | **25.2 ms** |
+| UNet plain | 38.0 ms | 19.0 ms |
+| Joint compiled UNet+decode | 89.3 ms | 44.6 ms (22.4 FPS) |
+| Joint compiled b1 | 52.1 ms | 19.2 FPS |
+
+The "cliff" does not reproduce on a clean GPU — fusion-mlx's "VAE decode
+already ~20ms/frame" note is correct. #921 retracted as "sole remaining
+blocker" (correction comment filed); ~11ms/frame gap to 30FPS remains,
+shared between UNet (19ms) and decode (25ms) — ordinary headroom, not a
+kernel cliff.
+
+SmartConv2d autotune (v0.10.4) verified: 6/10 shapes im2col wins on 0.32.2;
+`FUSION_MUSETALK_SMART_CONV=1` wraps 55 VAE convs; but in-graph decode is
+slower (55.1ms vs 50.4ms plain) — default OFF is correct. Parity clean on a
+single decode: cosine 0.999995, PSNR 64.5dB, drift mean 0.0017 / max 0.0237
+(smaller than the changelog's 0.4/5.0 — that compounds through full
+paste-back chain).
+
 ## Performance (M5 Max, clean GPU, fusion-mlx server + linguakids watchdog stopped)
 
 Methodology: background GPU load inflates every number several-fold. Before
@@ -49,41 +77,35 @@ measuring: `~/fusion/fusion-mlx/start.sh stop`,
 `fusion_mlx.media.image_worker` / `fusion-mlx-server` on demand — verify with
 `ps aux` between runs.
 
-Component micro-benchmarks (fp16, clean GPU, fresh process):
+Component micro-benchmarks (fp16, clean GPU, fresh process, v0.10.4):
 
 | Path | Time |
 |---|---|
-| UNet compiled b1 / b2 | 29.4ms / 46.7ms (23.4ms/frame) |
-| VAE decode plain b2 | 131ms (65.6ms/frame) |
-| VAE decode compiled b2 | 115ms (57.6ms/frame) |
-| **Joint UNet+decode compiled b2 (one graph)** | **82.1ms (41.0ms/frame)** |
-| Split compiled UNet then compiled decode b2 | 162ms — compiled-input boundary penalty, do not use |
-
-Same-process A/B (session hot loop): split 178ms/round → joint 82ms/round
-(2.2x). Sustained-load same-process standalone: 145-210ms/round (clock
-degradation + background contention), session p50 145-165ms/round.
+| UNet plain b2 | 38.0ms (19.0ms/frame) |
+| VAE decode plain b2 | 50.4ms (25.2ms/frame) |
+| **Joint UNet+decode compiled b2 (one graph)** | **89.3ms (44.6ms/frame, 22.4 FPS)** |
+| Joint compiled b1 | 52.1ms (19.2 FPS) |
+| VAE decode + SmartConv2d autotune b2 | 55.1ms — slower in-graph, default OFF |
 
 Memory: MLX default allocator cache grew to 13.55GB during the hot loop with
 render spikes p90 >1.2s; `set_cache_limit(1GB)` + `set_memory_limit(3GB)`
 (`session._tune_mlx_memory`) → cache 0.91GB, spikes p90 304ms, RSS 17GB →
 4.2GB (PRD ≤4GB essentially met).
 
-Current E2E sustained: ~8 FPS under chronic background GPU load (5
-consecutive retries 7.5-8.0); a clean-window number was not obtainable during
-this session. To hit 30FPS the remaining gap is upstream: conv2d kernel
-cliffs (#919 — VAE decode 58ms/frame where ~20ms is reachable) and the
-no-op graph pass (#918). Consumer-side levers (fp16, precompute, batch-2,
-joint compile, memory caps, im2col-GEMM shim — the last one measured 7x
-WORSE in-graph and was rejected) are exhausted.
+Current E2E: 22.4 FPS (joint b2, clean GPU). To hit 30FPS (33.3ms/frame =
+66.6ms b2 round) the remaining gap is ~23ms/round, shared between UNet and
+decode — ordinary optimization headroom, not a kernel cliff. The earlier
+~8 FPS sustained number was background-load contamination, not a code limit.
 
 NOTE: `com.linguakids.watchdog` (launchd) auto-restarts the fusion-mlx
-server every interval — benchmarks are meaningless while it runs.
+server every interval — benchmarks are meaningless while it runs. The v0.10.3
+"58ms decode" figure was measured under this contamination and is retracted.
 
 Upstream follow-ups filed 2026-09-19: #919 comment (in-graph A/B data,
 dispatch-rule recalibration proposal), #918 comment (musetalk topology
 matches 0 sites; `groupnorm_silu_conv` pre-conv pattern request), #921
-(new) — Metal conv2d fp16 kernel cliffs as the sole remaining 30FPS
-blocker, with Winograd + ICB + kernel-selection proposals.
+(filed as conv2d kernel cliff blocker — **retracted** via correction
+comment: baseline was contention-contaminated, clean GPU = 25ms/frame).
 
 ## Verified (tests/integration/, green)
 

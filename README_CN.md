@@ -92,10 +92,10 @@ crop。bbox 数学、卡尔曼平滑、守卫与待机逻辑由 `tests/test_land
 | `mx.metal.set_cache_limit(1GB)` + `set_memory_limit(3GB)` | allocator cache 原本涨到 13.5GB、渲染尖峰 >1s；现 p90 304ms，RSS 17GB → 4.2GB |
 | 批 2 热路径（`config.BATCH`） | 每 2 步一次 UNet+decode，RTT 安全（多等一个 33ms 步） |
 
-隔离干净 GPU 微基准（fp16）：UNet+VAE-decode 联合 batch-2 = 82ms/round
-（41ms/帧）。本机持续满载 E2E 低于此值（长期后台 GPU 负载；MLX conv2d kernel
-悬崖，上游 #919 —— VAE 256x256 解码 ~58ms/帧，理论应可达 ~20ms）。30FPS 需要
-上游 kernel 工作（#918/#919）；消费侧上述杠杆已用尽。
+隔离干净 GPU 微基准（fp16, v0.10.4）：UNet+VAE-decode 联合 batch-2 = 89.3ms/round
+（44.6ms/帧, 22.4 FPS）。VAE decode = 25.2ms/帧，UNet = 19.0ms/帧。早期「58ms decode / 8 FPS
+持续」数据被 linguakids watchdog 自动重启 fusion-mlx 服务器污染，已撤回。30FPS 剩余
+差距约 23ms/round，属常规优化空间，非 kernel 悬崖。
 
 ## PRD V1.1-RC2 差距补齐（本次发布）
 
