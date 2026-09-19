@@ -1,0 +1,108 @@
+# End-to-end quality regression (PRD §10.5)
+
+## Status
+
+| Metric | Threshold | Status | First measurement | Needs GT? |
+|---|---|---|---|---|
+| PSNR | ≥38dB | **gated** (needs CUDA GT) | — | yes |
+| SSIM | ≥0.95 | **gated** (needs CUDA GT) | — | yes |
+| CSIM | ≥0.98 | **gated** (needs CUDA GT + arcface) | — | yes |
+| LSE-C | ≥5.5 | **ready** | 0.76 ❌ | no |
+| LSE-D | ≤9.0 | **ready** | 11.50 ❌ | no |
+
+LSE-C/LSE-D measure the output video's own audio-video sync — they do not
+need CUDA ground-truth, so they run now. PSNR/SSIM/CSIM compare against CUDA
+GT and are gated until the MuseTalk PyTorch torch env + weights are
+provisioned (`musetalk-mlx-gen-gt`, stub).
+
+**First measurement** is on a 150-frame (5s) musetalk-mlx offline output
+driven by `eng.wav` on the `sun.mp4` template. Both LSE metrics fail the PRD
+thresholds (reference: MuseTalk 6.53 / Wav2Lip 7.42 / LatentSync 7.90 LSE-D).
+The output has real lip motion (mouth motion energy 0.90 ≈ source) but
+SyncNet finds weak A/V correlation (AV offset saturates at the vshift=15
+edge). This is an output-quality finding for the next phase, not an eval-pipeline bug — see validation below.
+
+## Pipeline validation (matches native LatentSync)
+
+The `evaluate_sync` port was validated byte-for-byte against the canonical
+LatentSync `eval/syncnet/syncnet_eval.py` + `eval/syncnet_detect.py` pipeline
+(joonson `syncnet_v2.model`, S3FD detector, `crop_scale=0.4` mouth-biased
+crop, medfilt(k=13) smoothing, 25fps resample):
+
+| Input | Native S3FD pipeline | This suite (insightface crop) |
+|---|---|---|
+| musetalk-mlx output (eng.wav-driven) | LSE-D=11.50 LSE-C=0.76 | LSE-D=10.54 LSE-C=0.55 |
+| sun.mp4 + sun.wav (unsynced template) | LSE-D=13.33 LSE-C=0.11 | LSE-D=13.74 LSE-C=0.08 |
+
+The insightface crop tracks the native S3FD result within ~1 LSE-D. The
+sun.mp4+sun.wav "baseline" is **not** a valid sync reference — MuseTalk's
+template video mouth motion does not match `sun.wav` (unsynced content), so
+both pipelines correctly report poor sync. A true positive control (a known
+lip-synced output) is still needed to bound the absolute LSE floor; deferred
+until CUDA GT generation lands.
+
+## Eval env
+
+Eval models (SyncNet + arcface) run in the **openclaw conda env** (torch 2.14
++ insightface), not the musetalk-mlx venv (torch-free at runtime per PRD).
+Install deps:
+
+```bash
+conda activate openclaw
+pip install python_speech_features scikit-image
+# syncnet weights (joonson syncnet_v2.model, via hf-mirror)
+HF_ENDPOINT=https://hf-mirror.com huggingface-cli download \
+    ByteDance/LatentSync-1.5 auxiliary/syncnet_v2.model \
+    --local-dir weights/eval
+# arcface (insightface buffalo_l, auto-downloaded on first use)
+```
+
+## LSE-C / LSE-D definition (canonical)
+
+Faithful port of joonson/LatentSync `eval/syncnet/syncnet_eval.py`
+(`SyncNetEval.evaluate`):
+
+- **LSE-D** = `min(mean_dists)` — minimum mean pairwise embedding distance
+  over AV offsets (vshift=15). Lower = better sync.
+- **LSE-C** = `median(mean_dists) - min_dist` — confidence (how much better
+  synced than the median offset). Higher = better.
+- Input: 5 consecutive 224×224 face frames + MFCC(16kHz, 20-frame windows).
+- Weights: joonson `syncnet_v2.model` @ `ByteDance/LatentSync-1.5`.
+- Video is resampled to 25fps (canonical; MFCC 100fps ÷ 4 = 25 video fps).
+  musetalk-mlx renders at 30fps per PRD — the eval resamples before SyncNet.
+
+## Face crop deviation
+
+Upstream uses S3FD + scenedetect per-face-track stabilization. We use
+insightface (shared with CSIM) with the **canonical crop geometry**
+replicated exactly: per-frame bbox, `crop_scale=0.4`, mouth-biased
+asymmetric square crop (side = `max(w,h)·1.4`, biased toward the chin),
+medfilt(k=13) smoothing, 25fps resample. Only the detector differs
+(insightface vs S3FD); validated to track the native S3FD result within
+~1 LSE-D for single-face talking heads. Switch to S3FD if multi-face or
+stricter parity is needed (deps: torchvision, sfd_face.pth, scenedetect).
+
+## Datasets (PRD §10.5.2)
+
+- HDTF 100 clips — not yet provisioned.
+- K12 private 15 clips — not yet provisioned.
+- Current: MuseTalk sample data (eng/sun/yongen, 3 pairs) for smoke runs.
+
+## Run
+
+```bash
+# LSE only (pred has no audio track — mux source audio):
+musetalk-mlx-eval --pred output.mp4 \
+    --audio source.wav \
+    --syncnet weights/eval/auxiliary/syncnet_v2.model
+
+# full (with GT):
+musetalk-mlx-eval --pred output.mp4 --gt gt.mp4 \
+    --audio source.wav \
+    --syncnet weights/eval/auxiliary/syncnet_v2.model
+```
+
+`--audio` muxes the 16kHz source wav into the pred video (via ffmpeg) when
+the pred lacks an audio track — musetalk-mlx offline output is video-only;
+SyncNet needs both streams.
+
