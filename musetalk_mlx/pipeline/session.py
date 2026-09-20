@@ -225,10 +225,9 @@ class MuseTalkSession:
                 with self._emit_lock:
                     self._last_frame = out
                     self._emit(out, item[4])
-            elif not self._paste_q.empty():
-                time.sleep(0.002)  # worker draining the tail
-            if self._out_q:
-                return self._out_q.popleft()
+            out = self._wait_out_q()
+            if out is not None:
+                return out
             return None
         tier = thermal_tier()
         ladder = ladder_for_tier(tier)
@@ -251,12 +250,24 @@ class MuseTalkSession:
                 return None
             state = self._inflight.popleft()
             self._finish_round(state)
-            if self._out_q:
-                return self._out_q.popleft()
+            out = self._wait_out_q()
+            if out is not None:
+                return out
             return None
         chunk, pts = self._pending.popleft()
         frame = self._render(chunk)
         self._emit(frame, pts)
+        return self._out_q.popleft()
+
+    def _wait_out_q(self, timeout_s: float = 0.2):
+        # Paste/emit runs on the worker thread (mp paste round trip ~15ms);
+        # briefly wait so None keeps its pre-async meaning: nothing pending
+        # anywhere, not "paste still in flight". Poll, never block forever.
+        deadline = time.monotonic() + timeout_s
+        while not self._out_q:
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.002)
         return self._out_q.popleft()
 
     def _emit(self, frame, pts) -> None:
@@ -511,6 +522,7 @@ class MuseTalkSession:
             self._compiled_generate = compile_with_custom_pass(render_fn)
             log.info("fusion-mlx graph pass applied to joint UNet+decode (#911/#918)")
             if config.DECODE_128:
+
                 def render_fn_128(latent, audio):
                     pred = pipe.unet(latent, mx.array([UNET_TIMESTEP]), apply_pe(audio))
                     return mx.clip(pipe.vae.decode(_pool2x(pred) / pipe.scaling_factor) / 2 + 0.5, 0, 1)
