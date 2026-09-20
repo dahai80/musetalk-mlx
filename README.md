@@ -96,20 +96,32 @@ background GPU load inflates numbers several-fold (see
 | Joint `mx.compile` of UNet+VAE-decode (one graph) | 178ms → 82ms per batch-2 round (2.2x); split compiled calls pay a compiled-input boundary penalty |
 | **MLX 0.32.0 pin** | 0.32.2 ships a decode kernel regression on the compiled joint graph: 73.6 vs 61.6ms/round measured. `mlx==0.32.0` + `mlx-metal==0.32.0` required for the numbers below |
 | **Allocator limits POST-warmup** (cache 4GB + budget 8GB after load/precompute) | limits set before load poison the allocator watermark: 84–92ms vs 62–67ms per round, all process long. Cache sweep at 2.5/3/3.5/4/5/6GB: 61.8/58.9/59.1/57.0/56.9/58.4ms |
-| Depth-2 render-ahead | two lazy rounds queued so the GPU stays busy across paste/emit CPU work (single stream; sync is stream-wide) |
+| Depth-2 render-ahead | two lazy rounds queued so the GPU stays busy across paste/emit CPU work (single stream; sync is stream-wide). Caveat: MLX lazy eval currently serializes — a submitted round's graph only materializes on sync, so the depth-2 queue does not yet overlap GPU compute with paste. Overlap needs eager dispatch (fusion-mlx issue pending) |
 | Paste worker thread + `cv2.blendLinear` | warp/blend/emit (pure cv2/numpy) off the render thread; blend 7x faster than numpy fp32 math; parse-mask cache misses deferred to the main thread |
+| **Subprocess paste worker** (`config.PASTE_MULTIPROC`, default ON) | paste/blend runs in a child process (own GIL), immune to the GIL starvation from MLX's busy-wait sync on the render thread. 4-byte length-framed pickle protocol over stdin/stdout; IPC ships the expanded crop only, not the full frame. Thread-only fallback on IPC failure |
+| **`DECODE_128` speed switch** (`config.DECODE_128`, default OFF) | 2x2 average-pool the UNet output latent (32²→16²) before VAE decode → 128² face patch at ~1/4 decode FLOPs. Speed-over-quality for scenarios that tolerate it; ships disabled, opt-in by flag |
 | Batch-2 hot path (`config.BATCH`) | one UNet+decode per 2 steps, RTT-safe (adds one 33ms step) |
 
-Isolated clean-GPU microbenchmarks (fp16, MLX 0.32.0, v0.10.4): compiled joint
-UNet+VAE-decode batch-2 = **60.8–67ms/round** (30.4–33.5ms/frame, **30–33 FPS**
-GPU-only ceiling). Live pipeline: **24.4 FPS average** over a 400-frame run
-(was 15.4), with steady windows touching 30 FPS — GPU clock state dominates
-run-to-run variance (idle-boosted processes measure 60ms/round; hot ones 95ms
-for identical code). Remaining known costs: ~20ms/round of paste/emit CPU work
-partly starved by the GIL during MLX's busy-wait sync, and window-boundary
-whisper encodes. The earlier "58ms decode / 8 FPS sustained" figures were
+Isolated clean-GPU microbenchmarks (fp16, MLX 0.32.0, allocator caps on,
+v0.10.4), 60-round burst:
+
+| Config | GPU/round (b2) | GPU ceiling | Live e2e FPS |
+|---|---|---|---|
+| Full decode (default) | 61.0ms | 32.8 FPS | 19.4 |
+| `DECODE_128` on | 34.1ms | 58.7 FPS | 27.7 |
+
+The live-to-ceiling gap (~19ms/frame) is paste + readback serialized on the
+main thread — depth-2 render-ahead does not yet overlap because MLX lazy
+evaluation materializes a round's graph only on sync (see caveat above).
+**The 30 FPS lever is the VAE decoder**: decode alone is 59ms of the 61ms
+round, dominated by the 3-upsample conv stack. Conv+GroupNorm+SiLU MSL fusion
+(fusion-mlx issue, design below) is the path to cut decode to ~30ms and clear
+30 FPS at full 256² quality. `DECODE_128` already clears 30 FPS at 128² when
+quality can be traded.
+
+The earlier "58ms decode / 8 FPS sustained" and "24.4 FPS live" figures were
 contention-contaminated (linguakids watchdog auto-restarting the fusion-mlx
-server) and are retracted.
+server) and are retracted; the table above is clean-GPU.
 
 ## PRD V1.1-RC2 gap-fill (this release)
 

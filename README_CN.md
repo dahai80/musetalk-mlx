@@ -91,17 +91,27 @@ crop。bbox 数学、卡尔曼平滑、守卫与待机逻辑由 `tests/test_land
 | UNet+VAE-decode 联合 `mx.compile`（单图） | 每批 2 帧的 round 178ms → 82ms（2.2 倍）；分离编译有 compiled-input 边界开销 |
 | **MLX 0.32.0 版本锁定** | 0.32.2 的 decode kernel 在联合编译图上有回归：实测 73.6 vs 61.6ms/round。以下数字要求 `mlx==0.32.0` + `mlx-metal==0.32.0` |
 | **allocator 上限在预热后设置**（load/precompute 完成后 cache 4GB + budget 8GB） | load 之前设置上限会永久污染 allocator 水位：全程 84–92ms vs 62–67ms/round。cache 扫描 2.5/3/3.5/4/5/6GB → 61.8/58.9/59.1/57.0/56.9/58.4ms |
-| 深度 2 渲染前瞻 | 排队两个 lazy round，GPU 在 paste/emit CPU 工作期间保持忙碌（单流；sync 是流级粒度） |
+| 深度 2 渲染前瞻 | 排队两个 lazy round，GPU 在 paste/emit CPU 工作期间保持忙碌（单流；sync 是流级粒度）。注意：MLX lazy eval 当前会串行化 —— 提交的 round 的图只在 sync 时才物化，故深度 2 队列尚未让 GPU 计算与 paste 重叠。重叠需 eager dispatch（fusion-mlx issue 待提） |
 | paste 工作线程 + `cv2.blendLinear` | warp/blend/emit（纯 cv2/numpy）移出渲染线程；blend 比numpy fp32 快 7 倍；parse-mask cache miss 延迟到主线程 |
+| **子进程 paste worker**（`config.PASTE_MULTIPROC`，默认开） | paste/blend 跑在子进程（独立 GIL），不受 MLX busy-wait sync 在渲染线程上的 GIL 饿死影响。stdin/stdout 上 4 字节长度帧 + pickle 协议；IPC 只传 expand 后的 crop，不传整帧。IPC 失败回退线程内 paste |
+| **`DECODE_128` 速度开关**（`config.DECODE_128`，默认关） | UNet 输出 latent 2x2 均值池化（32²→16²）后再 VAE decode → 128² face patch，decode FLOPs ~1/4。速度优先、可牺牲质量场景；默认关闭，按 flag 开启 |
 | 批 2 热路径（`config.BATCH`） | 每 2 步一次 UNet+decode，RTT 安全（多等一个 33ms 步） |
 
-隔离干净 GPU 微基准（fp16, MLX 0.32.0, v0.10.4）：联合编译 UNet+VAE-decode batch-2 =
-**60.8–67ms/round**（30.4–33.5ms/帧，**30–33 FPS** 纯 GPU 上限）。真实管线：400 帧实测
-**平均 24.4 FPS**（此前 15.4），稳态窗口触及 30 FPS —— GPU 时钟态主导 run-to-run 方差
-（idle 加速态同代码测 60ms/round，热态 95ms）。剩余已知开销：~20ms/round 的 paste/emit
-CPU 工作在 MLX busy-wait sync 期间被 GIL 部分饿死，以及窗口边界的 whisper 编码。早期
-「58ms decode / 8 FPS 持续」数据被 linguakids watchdog 自动重启 fusion-mlx 服务器污染，
-已撤回。
+隔离干净 GPU 微基准（fp16, MLX 0.32.0, allocator caps 开, v0.10.4），60-round burst：
+
+| 配置 | GPU/round（b2） | GPU 上限 | 实测 e2e FPS |
+|---|---|---|---|
+| 全 decode（默认） | 61.0ms | 32.8 FPS | 19.4 |
+| `DECODE_128` 开 | 34.1ms | 58.7 FPS | 27.7 |
+
+实测到上限的 gap（~19ms/帧）是 paste + readback 在主线程串行 —— 深度 2 渲染前瞻尚未
+重叠，因 MLX lazy eval 只在 sync 时物化 round 的图（见上文注意）。**30 FPS 的杠杆是
+VAE decoder**：61ms round 中 decode 独占 59ms，主要来自 3 个 upsample 卷积栈。
+Conv+GroupNorm+SiLU MSL 熔合内核（fusion-mlx issue，设计见下）是把 decode 砍到 ~30ms、
+在完整 256² 质量下达成 30 FPS 的路径。`DECODE_128` 在 128² 下已可达 30 FPS（质量可让渡时）。
+
+早期「58ms decode / 8 FPS 持续」「24.4 FPS 实测」数据被 linguakids watchdog 自动重启
+fusion-mlx 服务器污染，已撤回；上表为干净 GPU 数字。
 
 ## PRD V1.1-RC2 差距补齐（本次发布）
 
