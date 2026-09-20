@@ -140,6 +140,12 @@ class MuseTalkSession:
     def push_audio(self, pcm: np.ndarray) -> None:
         self._windower.push(pcm)
 
+    def end_of_stream(self) -> None:
+        # Offline boundary: zero-pad the sub-window audio tail so the final
+        # <5s renders instead of being silently dropped. No-op mid-stream.
+        if self._windower.flush():
+            self._encode_windows()
+
     def get_output_frame(self):
         # Render the next 33ms step. Returns (frame_bgr, pts) or None.
         self._encode_windows()
@@ -258,7 +264,9 @@ class MuseTalkSession:
             skip = round(self._windower.prefix_samples / self.step) if self._windower.prefix_samples else 0
             n = chunks.shape[0]
             for i in range(skip, n):
-                self._pending.append((chunks[i], pts0 + (i - skip) * self.step / self.sr))
+                # Chunk i is frame (i - skip) of this window: PTS advances 1/fps
+                # per chunk (step/sr is 533/16000 — off by 0.67% and drifts).
+                self._pending.append((chunks[i], pts0 + (i - skip) / self.fps))
             log.debug("encoded window pts=%.3fs -> %d chunks (skipped %d prefix)", pts0, n - skip, skip)
 
     def _render(self, chunk) -> np.ndarray:

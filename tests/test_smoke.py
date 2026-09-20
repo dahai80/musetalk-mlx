@@ -8,7 +8,9 @@ from musetalk_mlx.utils.thermal import thermal_tier
 def test_windower_alignment():
     w = AudioWindower()
     assert w.step == round(config.SR / config.FPS)  # 533 samples = 33.3ms
-    assert w.window == w.step * round(config.WINDOW_S * config.FPS)  # integer steps
+    # window sample-exact so window*fps/sr is an integer (no per-window drift)
+    assert w.window == round(config.SR * config.WINDOW_S)
+    assert (w.window * config.FPS) % config.SR == 0
 
 
 def test_windower_emit():

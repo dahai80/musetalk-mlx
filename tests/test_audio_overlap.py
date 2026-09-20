@@ -6,7 +6,10 @@ from musetalk_mlx.utils.audio import AudioWindower
 
 def test_windower_hop_lt_window():
     w = AudioWindower()
-    assert w.window == w.step * round(config.WINDOW_S * config.FPS)
+    # Window must be sample-exact: window*fps/sr integer, else get_whisper_chunk
+    # floor() drops a chunk per window and the video timeline drifts vs audio.
+    assert w.window == round(config.SR * config.WINDOW_S)
+    assert (w.window * config.FPS) % config.SR == 0
     assert w.hop < w.window
     assert w.hop == w.window - round(config.OVERLAP_S * config.SR)
 

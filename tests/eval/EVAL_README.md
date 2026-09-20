@@ -7,8 +7,8 @@
 | PSNR | ≥38dB | **gated** (needs CUDA GT) | — | yes |
 | SSIM | ≥0.95 | **gated** (needs CUDA GT) | — | yes |
 | CSIM | ≥0.98 | **gated** (needs CUDA GT + arcface) | — | yes |
-| LSE-C | ≥5.5 | **ready** | 4.02 ❌ (was 0.76) | no |
-| LSE-D | ≤9.0 | **ready** | 6.30 ✅ (was 11.50) | no |
+| LSE-C | ≥5.5 | **ready** | 5.70 ✅ (was 0.76) | no |
+| LSE-D | ≤9.0 | **ready** | 9.31 ❌ (was 11.50) | no |
 
 LSE-C/LSE-D measure the output video's own audio-video sync — they do not
 need CUDA ground-truth, so they run now. PSNR/SSIM/CSIM compare against CUDA
@@ -25,11 +25,26 @@ vs silence md5 identical). Second bug: `FaceParseMask` returned the parse
 labels at the backend's own output resolution (512×512) instead of the crop
 box size, so the paste alpha sampled the wrong region. Both fixed
 (`crop_bbox_to_xyxy` boundary conversion + label resize; regression tests in
-`test_blending.py`). After the fix the same render measures **LSE-D=6.30 ✅
-(better than the MuseTalk paper's 6.53) / LSE-C=4.02 ❌**, and a silence-audio
-negative control scores far worse (LSE-C=0.18), confirming the metric tracks
-the driving audio. LSE-C still below the 5.5 threshold — candidate causes
-(5s clip length, 30→25fps resample, chunk PTS alignment) are next-phase work.
+`test_blending.py`). **Third bug — window-boundary tempo drift:** the
+5s audio window was 79950 samples (150×533) but `get_whisper_chunk`'s
+`floor()` dropped one chunk per window while the windower still advanced 150
+PTS steps, so the video timeline lagged audio 0.67% per window; chunk PTS also
+used `step/sr` (533/16000) instead of `1/fps`. SyncNet measured this as a
+monotonic per-slice offset drift (−2 → −5 over 60s) which made the
+whole-video LSE collapse. Fixed: window length is sample-exact
+(`round(sr·window_s)`, so `window·fps/sr` is an integer) and chunk PTS
+advances `1/fps` (regression tests in `test_audio_overlap.py`/
+`test_smoke.py`).
+
+**Post-fix measurement** (60s `eng.wav` on the `sun.mp4` template, whole
+video): **LSE-C=5.70 ✅ / LSE-D=9.31 ❌**. Per-5s-slice offsets are now
+constant (+3) with LSE-C 4.3–6.8 per slice — no drift. A silence-audio
+negative control scores LSE-C=0.18, confirming the metric tracks the driving
+audio. Remaining LSE-D gap (9.31 vs ≤9.0; MuseTalk paper 6.53) is a
+feature/precision-quality item, not alignment: candidates are fp16 UNet,
+window-boundary feature quality, and the 5s-window whisper context (upstream
+encodes whole-audio context). Next-phase work; LSE-D is offset-invariant so
+the +3 constant offset does not affect it.
 
 ## Pipeline validation (matches native LatentSync)
 

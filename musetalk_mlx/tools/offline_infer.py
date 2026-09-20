@@ -36,13 +36,19 @@ def main() -> int:
 
     writer = imageio.get_writer(str(out_path), fps=a.fps)
     n = 0
+    flushed = False
     try:
         while True:
             if a.max_frames and n >= a.max_frames:
                 break
             out = session.get_output_frame()
             if out is None:
-                break
+                if flushed:
+                    break
+                # first drain complete: zero-pad + render the sub-window tail
+                session.end_of_stream()
+                flushed = True
+                continue
             frame, pts = out
             if n % 100 == 0:
                 log.info("frame %d pts=%.3fs", n, pts)

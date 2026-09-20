@@ -18,8 +18,11 @@ class AudioWindower:
         self.sr = sr
         self.fps = fps
         self.step = max(1, round(sr / fps))
-        n_steps = max(1, round(window_s * fps))
-        self.window = self.step * n_steps
+        # Window length in SAMPLES must make (window*fps/sr) land exactly on an
+        # integer frame count, else floor() in get_whisper_chunk drops one
+        # chunk per window and the video timeline lags the audio 0.67%/window
+        # (measured: SyncNet per-slice offsets drifted -2 -> -5 over 60s).
+        self.window = max(1, round(sr * window_s))
         overlap = max(0, round(overlap_s * sr))
         overlap = min(overlap, self.window - self.step)
         self.hop = self.window - overlap
@@ -72,6 +75,20 @@ class AudioWindower:
     def last_window_tail(self) -> np.ndarray:
         """Overlap tail of the most recent window (raw PCM) — prefix handoff to fusion-mlx #914."""
         return self._tail.copy()
+
+    def flush(self) -> bool:
+        """Zero-pad the buffer to the next full window (offline end-of-stream).
+
+        Streaming never flushes (wait for more audio); offline must render the
+        tail or the last <5s of audio silently produces no frames. Returns
+        True if padding was applied."""
+        need = self.window if self._tail.size == 0 else self.hop
+        if self.buf.size == 0 or self.buf.size >= need:
+            return False
+        pad = need - self.buf.size
+        self.buf = np.concatenate([self.buf, np.zeros(pad, dtype=np.float32)])
+        log.info("flush: zero-padded %.2fs tail to a full window", pad / self.sr)
+        return True
 
     def step_pts(self) -> float:
         """PTS of the next 33ms step, derived from consumed audio samples."""
