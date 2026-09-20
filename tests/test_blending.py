@@ -53,3 +53,24 @@ def test_feather_mask_shape():
     assert m.ndim == 2
     assert m.shape[0] > 0 and m.shape[1] > 0
     assert len(crop) == 4
+
+
+def test_crop_bbox_xyxy_conversion():
+    # FaceCropper.crop emits (x, y, w, h); regression: session used to feed the
+    # raw xywh into paste_back whose contract is (x1, y1, x2, y2) — x2=150 < x=217
+    # read as degenerate and the generated face was silently dropped (raw
+    # base-video passthrough, audio never affected output).
+    from musetalk_mlx.pipeline.blending import crop_bbox_to_xyxy
+
+    assert crop_bbox_to_xyxy((217, 159, 116, 150)) == (217, 159, 333, 309)
+
+
+def test_paste_back_with_cropper_style_bbox_changes_mouth():
+    from musetalk_mlx.pipeline.blending import crop_bbox_to_xyxy
+
+    frame = _frame()
+    face = np.full((256, 256, 3), 200, dtype=np.uint8)
+    xywh = (100, 100, 150, 150)  # what FaceCropper.crop actually returns
+    out = paste_back(frame, face, crop_bbox_to_xyxy(xywh), mask_provider=None)
+    assert out[200, 150].mean() > 100  # inside the pasted face
+    assert np.array_equal(out[0:80, :], frame[0:80, :])  # outside ROI untouched

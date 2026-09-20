@@ -37,6 +37,8 @@ def paste_back(
     x, y, x1, y1 = bbox
     if x1 <= x or y1 <= y:
         return frame_bgr
+    # Batched decode returns MLX arrays; OpenCV path needs host memory.
+    face = np.asarray(face)
     if mask_provider is not None:
         return _paste_masked(frame_bgr, face, bbox, mask_provider)
     return _paste_feather(frame_bgr, face, bbox)
@@ -85,3 +87,11 @@ def _paste_masked(frame_bgr: np.ndarray, face: np.ndarray, bbox, mp: MaskProvide
     crop[p_y0:p_y1, p_x0:p_x1] = blended.astype(np.uint8)
     frame_bgr[y_s:y_e, x_s:x_e] = crop
     return frame_bgr
+
+
+def crop_bbox_to_xyxy(bbox) -> tuple[int, int, int, int]:
+    # FaceCropper.crop emits (x, y, w, h); paste_back expects (x1, y1, x2, y2).
+    # Session converts at the boundary — this helper keeps the two contracts
+    # in one place so a producer change shows up in tests.
+    x, y, w, h = bbox
+    return (int(x), int(y), int(x) + int(w), int(y) + int(h))

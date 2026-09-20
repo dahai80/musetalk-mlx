@@ -61,6 +61,10 @@ class FaceParseMask(MaskProvider):
         if ph <= 0 or pw <= 0:
             return np.zeros((0, 0), dtype=np.float32), crop_box
         labels, _face_mask = self.backend.parse(frame_bgr[y_s:y_e, x_s:x_e])
+        if labels.shape[:2] != (ph, pw):
+            # Backend emits labels at its own output resolution; alpha must map
+            # 1:1 onto the crop box or _paste_masked samples the wrong region.
+            labels = cv2.resize(labels.astype(np.uint8), (pw, ph), interpolation=cv2.INTER_NEAREST)
         mask = np.isin(labels, _FACE_CLASSES).astype(np.float32)
         mask = _lower_band(mask)
         k = max(1, int(0.1 * ph // 2) * 2 + 1)

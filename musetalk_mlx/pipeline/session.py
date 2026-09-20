@@ -13,7 +13,7 @@ from .. import config
 from ..face.crop import FaceCropper
 from ..face.landmarks import LandmarkTracker
 from ..face.mask import load_face_parse
-from ..pipeline.blending import paste_back
+from ..pipeline.blending import crop_bbox_to_xyxy, paste_back
 from ..pipeline.lcm import LCMFastSession
 from ..utils.audio import AudioWindower
 from ..utils.profiling import StageProfiler
@@ -225,7 +225,7 @@ class MuseTalkSession:
             pf.end()
         for i, meta in enumerate(metas):
             pf.begin("warp")
-            out = paste_back(frames[i], faces[i], meta[1], mask_provider=self._mask)
+            out = paste_back(frames[i], faces[i], crop_bbox_to_xyxy(meta[1]), mask_provider=self._mask)
             pf.end()
             self._last_frame = out
             self._emit(out, items[i][1])
@@ -317,7 +317,7 @@ class MuseTalkSession:
             face = self.pipe.decode_latents(pred)[0]
             pf.end()
         pf.begin("warp")
-        out = paste_back(frame, face, bbox, mask_provider=self._mask)
+        out = paste_back(frame, face, crop_bbox_to_xyxy(bbox), mask_provider=self._mask)
         pf.end()
         self._last_frame = out
         return out

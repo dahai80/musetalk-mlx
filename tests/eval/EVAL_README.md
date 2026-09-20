@@ -7,20 +7,29 @@
 | PSNR | ≥38dB | **gated** (needs CUDA GT) | — | yes |
 | SSIM | ≥0.95 | **gated** (needs CUDA GT) | — | yes |
 | CSIM | ≥0.98 | **gated** (needs CUDA GT + arcface) | — | yes |
-| LSE-C | ≥5.5 | **ready** | 0.76 ❌ | no |
-| LSE-D | ≤9.0 | **ready** | 11.50 ❌ | no |
+| LSE-C | ≥5.5 | **ready** | 4.02 ❌ (was 0.76) | no |
+| LSE-D | ≤9.0 | **ready** | 6.30 ✅ (was 11.50) | no |
 
 LSE-C/LSE-D measure the output video's own audio-video sync — they do not
 need CUDA ground-truth, so they run now. PSNR/SSIM/CSIM compare against CUDA
 GT and are gated until the MuseTalk PyTorch torch env + weights are
 provisioned (`musetalk-mlx-gen-gt`, stub).
 
-**First measurement** is on a 150-frame (5s) musetalk-mlx offline output
-driven by `eng.wav` on the `sun.mp4` template. Both LSE metrics fail the PRD
-thresholds (reference: MuseTalk 6.53 / Wav2Lip 7.42 / LatentSync 7.90 LSE-D).
-The output has real lip motion (mouth motion energy 0.90 ≈ source) but
-SyncNet finds weak A/V correlation (AV offset saturates at the vshift=15
-edge). This is an output-quality finding for the next phase, not an eval-pipeline bug — see validation below.
+**First measurement** (150-frame / 5s offline run, `eng.wav` on the `sun.mp4`
+template) initially measured LSE-D=11.50 / LSE-C=0.76. Root cause was in the
+render pipeline, not the eval: `paste_back` received the `FaceCropper` bbox in
+`(x, y, w, h)` form while its contract is `(x1, y1, x2, y2)`, so `x2 < x1` read
+as degenerate and the generated face was silently dropped — output was raw
+base-video passthrough, byte-identical for any input audio (verified: real
+vs silence md5 identical). Second bug: `FaceParseMask` returned the parse
+labels at the backend's own output resolution (512×512) instead of the crop
+box size, so the paste alpha sampled the wrong region. Both fixed
+(`crop_bbox_to_xyxy` boundary conversion + label resize; regression tests in
+`test_blending.py`). After the fix the same render measures **LSE-D=6.30 ✅
+(better than the MuseTalk paper's 6.53) / LSE-C=4.02 ❌**, and a silence-audio
+negative control scores far worse (LSE-C=0.18), confirming the metric tracks
+the driving audio. LSE-C still below the 5.5 threshold — candidate causes
+(5s clip length, 30→25fps resample, chunk PTS alignment) are next-phase work.
 
 ## Pipeline validation (matches native LatentSync)
 
