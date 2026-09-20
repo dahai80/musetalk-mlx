@@ -94,15 +94,22 @@ background GPU load inflates numbers several-fold (see
 |---|---|
 | fp16 cast + offline precompute (landmarks/bbox/VAE latent) | DWPose + encode out of the hot loop |
 | Joint `mx.compile` of UNet+VAE-decode (one graph) | 178ms → 82ms per batch-2 round (2.2x); split compiled calls pay a compiled-input boundary penalty |
-| `mx.metal.set_cache_limit(1GB)` + `set_memory_limit(3GB)` | allocator cache was growing to 13.5GB, causing >1s render spikes; now p90 304ms, RSS 17GB → 4.2GB |
+| **MLX 0.32.0 pin** | 0.32.2 ships a decode kernel regression on the compiled joint graph: 73.6 vs 61.6ms/round measured. `mlx==0.32.0` + `mlx-metal==0.32.0` required for the numbers below |
+| **Allocator limits POST-warmup** (cache 4GB + budget 8GB after load/precompute) | limits set before load poison the allocator watermark: 84–92ms vs 62–67ms per round, all process long. Cache sweep at 2.5/3/3.5/4/5/6GB: 61.8/58.9/59.1/57.0/56.9/58.4ms |
+| Depth-2 render-ahead | two lazy rounds queued so the GPU stays busy across paste/emit CPU work (single stream; sync is stream-wide) |
+| Paste worker thread + `cv2.blendLinear` | warp/blend/emit (pure cv2/numpy) off the render thread; blend 7x faster than numpy fp32 math; parse-mask cache misses deferred to the main thread |
 | Batch-2 hot path (`config.BATCH`) | one UNet+decode per 2 steps, RTT-safe (adds one 33ms step) |
 
-Isolated clean-GPU microbenchmarks (fp16, v0.10.4): joint UNet+VAE-decode
-batch-2 = 89.3ms/round (44.6ms/frame, 22.4 FPS). VAE decode = 25.2ms/frame,
-UNet = 19.0ms/frame. The earlier "58ms decode / 8 FPS sustained" figures were
+Isolated clean-GPU microbenchmarks (fp16, MLX 0.32.0, v0.10.4): compiled joint
+UNet+VAE-decode batch-2 = **60.8–67ms/round** (30.4–33.5ms/frame, **30–33 FPS**
+GPU-only ceiling). Live pipeline: **24.4 FPS average** over a 400-frame run
+(was 15.4), with steady windows touching 30 FPS — GPU clock state dominates
+run-to-run variance (idle-boosted processes measure 60ms/round; hot ones 95ms
+for identical code). Remaining known costs: ~20ms/round of paste/emit CPU work
+partly starved by the GIL during MLX's busy-wait sync, and window-boundary
+whisper encodes. The earlier "58ms decode / 8 FPS sustained" figures were
 contention-contaminated (linguakids watchdog auto-restarting the fusion-mlx
-server) and are retracted. 30FPS gap is now ~23ms/round of ordinary headroom,
-not a kernel cliff.
+server) and are retracted.
 
 ## PRD V1.1-RC2 gap-fill (this release)
 

@@ -89,13 +89,19 @@ crop。bbox 数学、卡尔曼平滑、守卫与待机逻辑由 `tests/test_land
 |---|---|
 | fp16 转换 + 离线预计算（landmarks/bbox/VAE latent） | DWPose + encode 移出热循环 |
 | UNet+VAE-decode 联合 `mx.compile`（单图） | 每批 2 帧的 round 178ms → 82ms（2.2 倍）；分离编译有 compiled-input 边界开销 |
-| `mx.metal.set_cache_limit(1GB)` + `set_memory_limit(3GB)` | allocator cache 原本涨到 13.5GB、渲染尖峰 >1s；现 p90 304ms，RSS 17GB → 4.2GB |
+| **MLX 0.32.0 版本锁定** | 0.32.2 的 decode kernel 在联合编译图上有回归：实测 73.6 vs 61.6ms/round。以下数字要求 `mlx==0.32.0` + `mlx-metal==0.32.0` |
+| **allocator 上限在预热后设置**（load/precompute 完成后 cache 4GB + budget 8GB） | load 之前设置上限会永久污染 allocator 水位：全程 84–92ms vs 62–67ms/round。cache 扫描 2.5/3/3.5/4/5/6GB → 61.8/58.9/59.1/57.0/56.9/58.4ms |
+| 深度 2 渲染前瞻 | 排队两个 lazy round，GPU 在 paste/emit CPU 工作期间保持忙碌（单流；sync 是流级粒度） |
+| paste 工作线程 + `cv2.blendLinear` | warp/blend/emit（纯 cv2/numpy）移出渲染线程；blend 比numpy fp32 快 7 倍；parse-mask cache miss 延迟到主线程 |
 | 批 2 热路径（`config.BATCH`） | 每 2 步一次 UNet+decode，RTT 安全（多等一个 33ms 步） |
 
-隔离干净 GPU 微基准（fp16, v0.10.4）：UNet+VAE-decode 联合 batch-2 = 89.3ms/round
-（44.6ms/帧, 22.4 FPS）。VAE decode = 25.2ms/帧，UNet = 19.0ms/帧。早期「58ms decode / 8 FPS
-持续」数据被 linguakids watchdog 自动重启 fusion-mlx 服务器污染，已撤回。30FPS 剩余
-差距约 23ms/round，属常规优化空间，非 kernel 悬崖。
+隔离干净 GPU 微基准（fp16, MLX 0.32.0, v0.10.4）：联合编译 UNet+VAE-decode batch-2 =
+**60.8–67ms/round**（30.4–33.5ms/帧，**30–33 FPS** 纯 GPU 上限）。真实管线：400 帧实测
+**平均 24.4 FPS**（此前 15.4），稳态窗口触及 30 FPS —— GPU 时钟态主导 run-to-run 方差
+（idle 加速态同代码测 60ms/round，热态 95ms）。剩余已知开销：~20ms/round 的 paste/emit
+CPU 工作在 MLX busy-wait sync 期间被 GIL 部分饿死，以及窗口边界的 whisper 编码。早期
+「58ms decode / 8 FPS 持续」数据被 linguakids watchdog 自动重启 fusion-mlx 服务器污染，
+已撤回。
 
 ## PRD V1.1-RC2 差距补齐（本次发布）
 
