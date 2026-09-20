@@ -31,9 +31,14 @@ class MaskProvider:
     # Paste alpha mask for production blend (FR-MLX-005). Returns (mask, crop_box)
     # where crop_box is the expanded paste region (x_s, y_s, x_e, y_e). Real impl
     # needs a face-parse model (fusion-mlx #910); feather fallback hides the seam.
+    # mouth_mask_cached_only is the thread-safe read path for the paste worker
+    # thread: cache hit or a cheap pure-numpy mask, never a model call.
 
     def mouth_mask(self, frame_bgr: np.ndarray, face_box):
         raise NotImplementedError
+
+    def mouth_mask_cached_only(self, frame_bgr: np.ndarray, face_box):
+        return self.mouth_mask(frame_bgr, face_box)
 
 
 class FeatherMask(MaskProvider):
@@ -51,8 +56,16 @@ class FeatherMask(MaskProvider):
 
 
 class FaceParseMask(MaskProvider):
+    # Upstream MuseTalk computes the parse mask once per identity and reuses it;
+    # parsing every frame costs ~30ms and the alpha is nearly static (same face,
+    # same crop geometry). Cache keyed by quantized crop box; invalidate when the
+    # box moves more than MASK_CACHE_TOL px or the crop size changes.
+    MASK_CACHE_TOL = 4
+
     def __init__(self, backend):
         self.backend = backend
+        self._cache_key = None
+        self._cache_mask = None
 
     def mouth_mask(self, frame_bgr: np.ndarray, face_box):
         crop_box = _expand_crop_box(face_box, frame_bgr.shape)
@@ -60,6 +73,15 @@ class FaceParseMask(MaskProvider):
         ph, pw = y_e - y_s, x_e - x_s
         if ph <= 0 or pw <= 0:
             return np.zeros((0, 0), dtype=np.float32), crop_box
+        key = (pw, ph, x_s, y_s)
+        if (
+            self._cache_mask is not None
+            and self._cache_key is not None
+            and self._cache_key[:2] == key[:2]
+            and abs(self._cache_key[2] - key[2]) <= self.MASK_CACHE_TOL
+            and abs(self._cache_key[3] - key[3]) <= self.MASK_CACHE_TOL
+        ):
+            return self._cache_mask, crop_box
         labels, _face_mask = self.backend.parse(frame_bgr[y_s:y_e, x_s:x_e])
         if labels.shape[:2] != (ph, pw):
             # Backend emits labels at its own output resolution; alpha must map
@@ -68,7 +90,28 @@ class FaceParseMask(MaskProvider):
         mask = np.isin(labels, _FACE_CLASSES).astype(np.float32)
         mask = _lower_band(mask)
         k = max(1, int(0.1 * ph // 2) * 2 + 1)
-        return cv2.GaussianBlur(mask, (k, k), 0), crop_box
+        mask = cv2.GaussianBlur(mask, (k, k), 0)
+        self._cache_key = key
+        self._cache_mask = mask
+        return mask, crop_box
+
+    def mouth_mask_cached_only(self, frame_bgr: np.ndarray, face_box):
+        # Cache-hit-only lookup for the paste worker thread (never calls the
+        # MLX parse backend off the main thread). None means cache miss — the
+        # caller must fill the mask on the main thread.
+        if self._cache_mask is None or self._cache_key is None:
+            return None
+        crop_box = _expand_crop_box(face_box, frame_bgr.shape)
+        x_s, y_s, x_e, y_e = crop_box
+        pw, ph = x_e - x_s, y_e - y_s
+        key = (pw, ph, x_s, y_s)
+        if (
+            self._cache_key[:2] == key[:2]
+            and abs(self._cache_key[2] - key[2]) <= self.MASK_CACHE_TOL
+            and abs(self._cache_key[3] - key[3]) <= self.MASK_CACHE_TOL
+        ):
+            return self._cache_mask, crop_box
+        return None
 
 
 def load_face_parse() -> MaskProvider:

@@ -27,18 +27,26 @@ def _feather_mask(h: int, w: int, edge: int = 16) -> np.ndarray:
 
 
 def paste_back(
-    frame_bgr: np.ndarray, face: np.ndarray, bbox, mask_provider: MaskProvider | None = None
+    frame_bgr: np.ndarray,
+    face: np.ndarray,
+    bbox,
+    mask_provider: MaskProvider | None = None,
+    alpha: np.ndarray | None = None,
 ) -> np.ndarray:
     # Paste the generated 256^2 face patch back onto the base frame (FR-MLX-005).
     # Production path (MuseTalk blending.get_image): expand-crop the face region,
     # paste the generated face at its (x,y) offset within the crop, composite with
     # the face-parse mouth alpha (lower-band, Gaussian-blurred). Feather fallback
-    # when no mask provider. bbox is (x1, y1, x2, y2) in frame coords.
+    # when no mask provider. bbox is (x1, y1, x2, y2) in frame coords. `alpha`
+    # bypasses the provider lookup entirely — the paste worker thread passes a
+    # pre-fetched cache-hit mask so it never touches the MLX parse backend.
     x, y, x1, y1 = bbox
     if x1 <= x or y1 <= y:
         return frame_bgr
     # Batched decode returns MLX arrays; OpenCV path needs host memory.
     face = np.asarray(face)
+    if alpha is not None:
+        return _paste_alpha(frame_bgr, face, bbox, alpha)
     if mask_provider is not None:
         return _paste_masked(frame_bgr, face, bbox, mask_provider)
     return _paste_feather(frame_bgr, face, bbox)
@@ -68,6 +76,18 @@ def _paste_masked(frame_bgr: np.ndarray, face: np.ndarray, bbox, mp: MaskProvide
     alpha, _ = mp.mouth_mask(frame_bgr, bbox)
     if alpha.size == 0:
         return _paste_feather(frame_bgr, face, bbox)
+    return _paste_alpha(frame_bgr, face, bbox, alpha)
+
+
+def _paste_alpha(frame_bgr: np.ndarray, face: np.ndarray, bbox, alpha: np.ndarray) -> np.ndarray:
+    # Masked paste with a caller-provided alpha (pure cv2/numpy — safe on the
+    # paste worker thread; the MLX parse backend is only touched by the
+    # provider lookup in _paste_masked on the main thread).
+    x, y, x1, y1 = bbox
+    crop_box = _expand_crop_box(bbox, frame_bgr.shape)
+    x_s, y_s, x_e, y_e = crop_box
+    if x_e <= x_s or y_e <= y_s:
+        return _paste_feather(frame_bgr, face, bbox)
     # resize generated face to the face-box size, paste into the crop at offset
     fx, fy = x1 - x, y1 - y
     face_resized = cv2.resize(face, (fx, fy), interpolation=cv2.INTER_LINEAR)
@@ -80,10 +100,13 @@ def _paste_masked(frame_bgr: np.ndarray, face: np.ndarray, bbox, mp: MaskProvide
         return _paste_feather(frame_bgr, face, bbox)
     src = face_resized[p_y0 - oy : p_y1 - oy, p_x0 - ox : p_x1 - ox]
     dst = crop[p_y0:p_y1, p_x0:p_x1]
-    a = alpha[p_y0:p_y1, p_x0:p_x1][..., None]
-    if a.shape != src.shape:
-        a = cv2.resize(a, (src.shape[1], src.shape[0]), interpolation=cv2.INTER_LINEAR)[..., None]
-    blended = src.astype(np.float32) * a + dst.astype(np.float32) * (1 - a)
+    a = alpha[p_y0:p_y1, p_x0:p_x1]
+    if a.shape[:2] != src.shape[:2]:
+        a = cv2.resize(a, (src.shape[1], src.shape[0]), interpolation=cv2.INTER_LINEAR)
+    # MaskProvider alphas are float32 in [0, 1] (parse mask or feather band).
+    af = np.clip(a, 0.0, 1.0).astype(np.float32)
+    # cv2.blendLinear: SIMD per-pixel blend, ~7x faster than numpy fp32 math
+    blended = cv2.blendLinear(src, dst, af, 1.0 - af)
     crop[p_y0:p_y1, p_x0:p_x1] = blended.astype(np.uint8)
     frame_bgr[y_s:y_e, x_s:x_e] = crop
     return frame_bgr

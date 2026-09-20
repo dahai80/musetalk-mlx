@@ -1,4 +1,6 @@
 import logging
+import queue
+import threading
 import time
 from collections import deque
 
@@ -30,6 +32,10 @@ def _unet_forward(pipe, latent, chunk):
 
     dtype = getattr(pipe, "_dtype", None) or mx.float32
     audio = mx.array(chunk[None]).astype(dtype)
+    # fp32 VAE-encode latents must not leak into the UNet call in fp16 mode:
+    # mixed dtype forces a separate (slow) fp32 kernel specialization.
+    if latent.dtype != dtype:
+        latent = latent.astype(dtype)
     return pipe.unet(latent, mx.array([UNET_TIMESTEP]), apply_pe(audio))
 
 
@@ -61,6 +67,7 @@ class MuseTalkSession:
         self._mask = mask_provider if mask_provider is not None else load_face_parse()
         self._pending = deque()  # (chunk (50,384), pts seconds)
         self._out_q = deque()  # rendered (frame, pts) awaiting get_output_frame
+        self._inflight = deque()  # lazily dispatched rounds (img, metas, frames, items)
         self._last_frame = None
         self._reuse = 0
         self._audio_prefix = None  # fusion-mlx #914: prior window's tail embedding
@@ -72,6 +79,17 @@ class MuseTalkSession:
         self._tune_mlx_memory()
         self._setup_graph_pass()
         self._preload_bg()
+        self._set_render_cache()
+        # Paste worker thread: warp/blend/emit are pure cv2/numpy and run
+        # OFF the render thread so they overlap the GPU rounds (measured
+        # ~20ms/round of CPU post-processing that depth-2 render-ahead
+        # could not fully hide). The worker never calls MLX — mask cache
+        # misses are handed back to the main thread.
+        self._paste_q = queue.Queue()
+        self._paste_fallback = deque()
+        self._emit_lock = threading.Lock()
+        self._paste_worker_t = threading.Thread(target=self._paste_worker, name="musetalk-paste", daemon=True)
+        self._paste_worker_t.start()
         log.info(
             "MuseTalkSession ready: bg=%s frames=%d step=%d (%.1fms)",
             bg_video_path,
@@ -88,12 +106,29 @@ class MuseTalkSession:
 
     @staticmethod
     def _tune_mlx_memory() -> None:
-        # MLX's default cache grows unbounded (measured 13.5GB during the hot
-        # loop), which pushes the allocator into eviction churn: render rounds
-        # spike from ~80ms to >1s. Cap the reuse cache; MLX frees beyond it.
-        # fusion-mlx #920 does the same in from_pretrained_* (env-overridable);
-        # this covers sessions built on a preloaded pipe. New API first, the
-        # mx.metal spelling is deprecated since MLX 0.32.
+        # Pre-load: only a loose safety cap. Setting a TIGHT budget or cache
+        # limit here poisons the allocator watermark for the whole process:
+        # limits active during load/precompute made every later render round
+        # re-allocate (84-92ms vs 62-67ms per b2 round measured on MLX
+        # 0.32.0). Real caps land post-warmup in _set_render_cache.
+        limiter = getattr(mx, "set_memory_limit", None) or getattr(
+            getattr(mx, "metal", None), "set_memory_limit", None
+        )
+        try:
+            if limiter is not None:
+                limiter(32 * 1024 * 1024 * 1024)
+            log.info("MLX pre-load memory safety cap 32GB")
+        except Exception as e:
+            log.info("MLX memory tuning unavailable (%s); defaults kept", e)
+
+    @staticmethod
+    def _set_render_cache() -> None:
+        # Post-warmup caps (sweep on MLX 0.32.0, compiled joint graph, b2:
+        # 61.8/58.9/59.1/57.0/56.9/58.4 ms per round at 2.5/3/3.5/4/5/6GB
+        # cache) — 4GB keeps every decode intermediate resident without
+        # hoarding. Memory budget must also clear the real working set: live
+        # peak is ~4.6GB, and a 3GB budget made the allocator reclaim
+        # mid-round, costing +27ms/round.
         setter = getattr(mx, "set_cache_limit", None) or getattr(
             getattr(mx, "metal", None), "set_cache_limit", None
         )
@@ -102,12 +137,12 @@ class MuseTalkSession:
         )
         try:
             if setter is not None:
-                setter(1024 * 1024 * 1024)
+                setter(4 * 1024 * 1024 * 1024)
             if limiter is not None:
-                limiter(3 * 1024 * 1024 * 1024)
-            log.info("MLX memory tuned: cache<=1GB, limit 3GB")
+                limiter(8 * 1024 * 1024 * 1024)
+            log.info("MLX render memory tuned: cache<=4GB, limit 8GB (post-warmup)")
         except Exception as e:
-            log.info("MLX memory tuning unavailable (%s); defaults kept", e)
+            log.info("MLX cache tuning unavailable (%s); defaults kept", e)
 
     def reload(self, weights_dir=None, mlx_dir=None) -> bool:
         # V2 FR-MLX-006 / FR-END-005: hot-reload weights without dropping audio.
@@ -118,6 +153,7 @@ class MuseTalkSession:
         md = mlx_dir if mlx_dir is not None else self._mlx_dir
         log.info("ReloadModel: draining %d pending chunks, rebuilding pipe", len(self._pending))
         self._pending.clear()
+        self._inflight = deque()  # stale graph output belongs to the old pipe
         self._audio_prefix = None  # reset prefix cache on model swap
         try:
             new_pipe = self._build_pipe(wd, md)
@@ -132,6 +168,7 @@ class MuseTalkSession:
         if getattr(self, "_bg_pool", None):
             # cached latents belong to the old pipe dtype/weights; rebuild
             self._precompute_cache(self._bg_pool)
+        self._set_render_cache()
         self._weights_dir = wd
         self._mlx_dir = md
         log.info("ReloadModel done")
@@ -151,13 +188,39 @@ class MuseTalkSession:
         self._encode_windows()
         if self._out_q:
             return self._out_q.popleft()
-        if not self._pending:
+        if not self._pending and not self._inflight:
+            if self._paste_fallback:
+                # mask-cache miss deferred from the worker: fill + paste here
+                item = self._paste_fallback.popleft()
+                out = paste_back(item[0], item[1], item[2], mask_provider=self._mask)
+                with self._emit_lock:
+                    self._last_frame = out
+                    self._emit(out, item[4])
+            elif not self._paste_q.empty():
+                time.sleep(0.002)  # worker draining the tail
+            if self._out_q:
+                return self._out_q.popleft()
             return None
         tier = thermal_tier()
         ladder = ladder_for_tier(tier)
         normal = ladder["frame_reuse"] == 1 and ladder["patch"] == 256 and ladder["bg_downscale"] == 1
-        if config.BATCH > 1 and normal:
-            self._render_batched()
+        if config.BATCH > 1 and normal and self._compiled_generate is not None:
+            # Render-ahead depth 2: keep TWO lazy rounds queued so the GPU
+            # stays busy across the paste/emit CPU window (single stream runs
+            # rounds serially, but the queue must never drain while the CPU
+            # does numpy/cv2 work). Depth 1 left ~20ms/round of GPU idle
+            # (measured 89.5ms/round wall vs 72 ideal).
+            while len(self._inflight) < 2:
+                if not self._submit_round():
+                    break
+            if not self._inflight:
+                # cache miss / compiled failure: whole round falls back singly
+                self._render_all_singly()
+                if self._out_q:
+                    return self._out_q.popleft()
+                return None
+            state = self._inflight.popleft()
+            self._finish_round(state)
             if self._out_q:
                 return self._out_q.popleft()
             return None
@@ -176,11 +239,11 @@ class MuseTalkSession:
         self._expected_pts = pts + self.step / self.sr
         self._out_q.append((frame, pts))
 
-    def _render_batched(self) -> None:
+    def _submit_round(self) -> bool:
         # Batched hot path (PRD 30FPS): one UNet + one VAE decode per BATCH
-        # steps. RTT-safe: BATCH=2 adds one step (66ms) — within the <=80ms
-        # audio-to-video budget. Cache miss (idle frame / thermal) falls back
-        # to the per-frame path for the whole round (correct, slower).
+        # steps, dispatched LAZILY (no sync). RTT-safe: BATCH=2 adds one step
+        # (66ms) — within the <=80ms audio-to-video budget. Cache miss (idle
+        # frame / thermal) requeues and returns False; caller falls back singly.
         pf = self.profiler
         n = min(config.BATCH, len(self._pending))
         items = [self._pending.popleft() for _ in range(n)]
@@ -195,46 +258,76 @@ class MuseTalkSession:
                 # cache miss (idle/thermal frame): render this round singly
                 pf.end()
                 self._pending.extendleft(reversed(items))
-                return self._render_all_singly()
+                return False
             frames.append(frame)
             latents.append(cached[2])
             chunks.append(chunk)
             metas.append(cached)
         pf.end()
         if not latents:
-            return
+            return False
         dtype = getattr(self.pipe, "_dtype", None) or mx.float32
         pf.begin("unet")
-        lat = mx.concatenate(latents, 0)
+        # Both args must be dtype-exact: VAE-encode latents come back fp32
+        # (SafeGroupNorm fp32 protect), and a mixed fp32/fp16 call makes
+        # mx.compile specialize a slow fp32 graph (~50x slower measured).
+        lat = mx.concatenate(latents, 0).astype(dtype)
         ch = mx.concatenate([mx.array(c[None]) for c in chunks], 0).astype(dtype)
-        faces = None
-        if self._compiled_generate is not None:
-            try:
-                # joint UNet+VAE-decode graph; output is RGB [0,1] (B,3,256,256)
-                img = self._compiled_generate(lat, ch)
-            except Exception as e:
-                log.warning("compiled batched render failed (%s); plain batch", e)
-                self._compiled_generate = None
-            else:
-                pf.end()
-                pf.begin("vae_dec")
-                faces = self._decode_faces(img)
-                pf.end()
-        if faces is None:
-            from fusion_mlx.video.musetalk_mlx.config import UNET_TIMESTEP
-            from fusion_mlx.video.musetalk_mlx.whisper.audio2feature import apply_pe
+        try:
+            # joint UNet+VAE-decode graph; output is RGB [0,1] (B,3,256,256)
+            img = self._compiled_generate(lat, ch)
+        except Exception as e:
+            log.warning("compiled batched render failed (%s); plain path", e)
+            self._compiled_generate = None
+            self._pending.extendleft(reversed(items))
+            return False
+        pf.end()
+        self._inflight.append((img, metas, frames, items))
+        return True
 
-            pred = self.pipe.unet(lat, mx.array([UNET_TIMESTEP]), apply_pe(ch))
-            pf.end()
-            pf.begin("vae_dec")
-            faces = self.pipe.decode_latents(pred)
-            pf.end()
+    def _paste_worker(self) -> None:
+        # Render-thread offload: paste + emit for rounds whose parse-mask was
+        # a cache hit (the common case — mask is static per identity). Items
+        # are (frame, face, bbox_xyxy, alpha, pts); alpha None means the main
+        # thread must fill the mask first (worker must not touch MLX).
+        while True:
+            item = self._paste_q.get()
+            if item is None:
+                return
+            frame, face, bbox, alpha, pts = item
+            if alpha is None:
+                self._paste_fallback.append(item)
+                continue
+            out = paste_back(frame, face, bbox, alpha=alpha)
+            with self._emit_lock:
+                self._last_frame = out
+                self._emit(out, pts)
+
+    def _paste_item(self, frame, face, bbox, pts) -> None:
+        # Main-thread entry: fetch alpha (fills the parse cache on miss) and
+        # hand the item to the worker. Empty alpha (degenerate crop) pastes
+        # inline via the provider's feather fallback.
+        alpha, _ = self._mask.mouth_mask(frame, bbox)
+        if alpha.size != 0:
+            self._paste_q.put((frame, face, bbox, alpha, pts))
+        else:
+            out = paste_back(frame, face, bbox, mask_provider=self._mask)
+            with self._emit_lock:
+                self._last_frame = out
+                self._emit(out, pts)
+
+    def _finish_round(self, state) -> None:
+        # Sync + materialize a previously submitted round. By now the NEXT
+        # round is already dispatched, so this sync rides on a deep GPU queue.
+        img, metas, frames, items = state
+        pf = self.profiler
+        pf.begin("vae_dec")
+        faces = self._decode_faces(img)
+        pf.end()
         for i, meta in enumerate(metas):
             pf.begin("warp")
-            out = paste_back(frames[i], faces[i], crop_bbox_to_xyxy(meta[1]), mask_provider=self._mask)
+            self._paste_item(frames[i], faces[i], crop_bbox_to_xyxy(meta[1]), items[i][1])
             pf.end()
-            self._last_frame = out
-            self._emit(out, items[i][1])
 
     def _render_all_singly(self) -> None:
         while self._pending:
@@ -303,6 +396,8 @@ class MuseTalkSession:
             pf.end()
             pf.begin("vae")
             latent = self.pipe.get_latents_for_unet(crop)
+            if self.pipe._dtype is not None:
+                latent = latent.astype(self.pipe._dtype)
             pf.end()
         pf.begin("unet")
         face = None
@@ -338,9 +433,11 @@ class MuseTalkSession:
 
     def _decode_faces(self, img) -> np.ndarray:
         # Compiled-joint path output: RGB float [0,1] (B,3,256,256) -> BGR
-        # uint8, same contract as pipe.decode_latents.
-        arr = np.array(img.transpose(0, 2, 3, 1).astype(mx.float32))
-        return ((arr * 255).round().astype(np.uint8))[..., ::-1]
+        # uint8, same contract as pipe.decode_latents. Transpose + scale run
+        # in numpy: the MLX-side transpose/fp32 cast forced two extra GPU
+        # copies before a 2x-bytes readback for zero visual gain.
+        arr = np.array(img)
+        return ((arr.transpose(0, 2, 3, 1) * 255).round().astype(np.uint8))[..., ::-1]
 
     def _setup_graph_pass(self) -> None:
         # FR-MLX-003: consume the fusion-mlx #911/#918 graph passes when
