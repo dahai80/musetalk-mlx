@@ -17,6 +17,7 @@ from ..face.landmarks import LandmarkTracker
 from ..face.mask import load_face_parse
 from ..pipeline.blending import crop_bbox_to_xyxy, paste_back
 from ..pipeline.lcm import LCMFastSession
+from ..pipeline.paste_proc import PasteProcess
 from ..utils.audio import AudioWindower
 from ..utils.profiling import StageProfiler
 from ..utils.thermal import ladder_for_tier, thermal_tier
@@ -37,6 +38,15 @@ def _unet_forward(pipe, latent, chunk):
     if latent.dtype != dtype:
         latent = latent.astype(dtype)
     return pipe.unet(latent, mx.array([UNET_TIMESTEP]), apply_pe(audio))
+
+
+def _pool2x(z):
+    # DECODE_128 (speed-over-quality switch): 2x2 average-pool the UNet
+    # output latent before the VAE decoder. Decoder FLOPs scale with
+    # spatial^2, so 32^2 -> 16^2 gives a 128^2 face patch at ~1/4 decode
+    # cost. UNet + audio conditioning untouched. Pure ops, compile-safe.
+    b, c, h, w = z.shape
+    return z.reshape(b, c, h // 2, 2, w // 2, 2).mean(axis=(3, 5))
 
 
 class MuseTalkSession:
@@ -90,6 +100,17 @@ class MuseTalkSession:
         self._emit_lock = threading.Lock()
         self._paste_worker_t = threading.Thread(target=self._paste_worker, name="musetalk-paste", daemon=True)
         self._paste_worker_t.start()
+        # GIL bypass: the paste blend runs in a child process (own GIL); the
+        # worker thread only does IPC. Fallback on start failure or any IPC
+        # error is in-process paste_back on the worker thread.
+        self._paste_mp = None
+        if config.PASTE_MULTIPROC:
+            try:
+                self._paste_mp = PasteProcess()
+                self._paste_mp.start()
+            except Exception as e:
+                log.warning("paste proc unavailable (%s); thread-only paste", e)
+                self._paste_mp = None
         log.info(
             "MuseTalkSession ready: bg=%s frames=%d step=%d (%.1fms)",
             bg_video_path,
@@ -100,6 +121,14 @@ class MuseTalkSession:
 
     @staticmethod
     def _build_pipe(weights_dir, mlx_dir):
+        # Pipeline-level SmartConv2d wrapping (fusion-mlx default ON) measured
+        # 1.5x SLOWER inside the joint compiled UNet+decode graph — keep the
+        # native conv2d path unless config.SMART_CONV opts in. Must be set
+        # before from_pretrained* so the module tree stays unwrapped.
+        if not config.SMART_CONV:
+            import os
+
+            os.environ["FUSION_MUSETALK_SMART_CONV"] = "0"
         if mlx_dir is not None:
             return MuseTalkPipeline.from_pretrained_mlx(mlx_dir)
         return MuseTalkPipeline.from_pretrained(weights_dir)
@@ -204,7 +233,8 @@ class MuseTalkSession:
         tier = thermal_tier()
         ladder = ladder_for_tier(tier)
         normal = ladder["frame_reuse"] == 1 and ladder["patch"] == 256 and ladder["bg_downscale"] == 1
-        if config.BATCH > 1 and normal and self._compiled_generate is not None:
+        gen = self._compiled_generate_128 if config.DECODE_128 else self._compiled_generate
+        if config.BATCH > 1 and normal and gen is not None:
             # Render-ahead depth 2: keep TWO lazy rounds queued so the GPU
             # stays busy across the paste/emit CPU window (single stream runs
             # rounds serially, but the queue must never drain while the CPU
@@ -274,11 +304,13 @@ class MuseTalkSession:
         lat = mx.concatenate(latents, 0).astype(dtype)
         ch = mx.concatenate([mx.array(c[None]) for c in chunks], 0).astype(dtype)
         try:
-            # joint UNet+VAE-decode graph; output is RGB [0,1] (B,3,256,256)
-            img = self._compiled_generate(lat, ch)
+            # joint UNet+VAE-decode graph; output is RGB [0,1] (B,3,H,W)
+            gen = self._compiled_generate_128 if config.DECODE_128 else self._compiled_generate
+            img = gen(lat, ch)
         except Exception as e:
             log.warning("compiled batched render failed (%s); plain path", e)
             self._compiled_generate = None
+            self._compiled_generate_128 = None
             self._pending.extendleft(reversed(items))
             return False
         pf.end()
@@ -298,7 +330,11 @@ class MuseTalkSession:
             if alpha is None:
                 self._paste_fallback.append(item)
                 continue
-            out = paste_back(frame, face, bbox, alpha=alpha)
+            out = None
+            if self._paste_mp is not None:
+                out = self._paste_mp.paste(frame, face, bbox, alpha)
+            if out is None:
+                out = paste_back(frame, face, bbox, alpha=alpha)
             with self._emit_lock:
                 self._last_frame = out
                 self._emit(out, pts)
@@ -401,13 +437,15 @@ class MuseTalkSession:
             pf.end()
         pf.begin("unet")
         face = None
-        if self._compiled_generate is not None:
+        gen = self._compiled_generate_128 if config.DECODE_128 else self._compiled_generate
+        if gen is not None:
             try:
                 dtype = getattr(self.pipe, "_dtype", None) or mx.float32
-                img = self._compiled_generate(latent, mx.array(chunk[None]).astype(dtype))
+                img = gen(latent, mx.array(chunk[None]).astype(dtype))
             except Exception as e:
                 log.warning("compiled render failed (%s); plain path", e)
                 self._compiled_generate = None
+                self._compiled_generate_128 = None
             else:
                 pf.end()
                 pf.begin("vae_dec")
@@ -415,6 +453,8 @@ class MuseTalkSession:
                 pf.end()
         if face is None:
             pred = _unet_forward(self.pipe, latent, chunk)
+            if config.DECODE_128 and latent.shape[-1] == config.LATENT:
+                pred = _pool2x(pred)
             pf.end()
             pf.begin("vae_dec")
             face = self.pipe.decode_latents(pred)[0]
@@ -448,6 +488,7 @@ class MuseTalkSession:
         # mx.compile). One graph for unet->decode is ~2x faster than two
         # compiled calls (no compiled-input boundary).
         self._compiled_generate = None
+        self._compiled_generate_128 = None
         if not config.GRAPH_OPT:
             log.info("graph pass disabled by config flag")
             return
@@ -469,6 +510,13 @@ class MuseTalkSession:
 
             self._compiled_generate = compile_with_custom_pass(render_fn)
             log.info("fusion-mlx graph pass applied to joint UNet+decode (#911/#918)")
+            if config.DECODE_128:
+                def render_fn_128(latent, audio):
+                    pred = pipe.unet(latent, mx.array([UNET_TIMESTEP]), apply_pe(audio))
+                    return mx.clip(pipe.vae.decode(_pool2x(pred) / pipe.scaling_factor) / 2 + 0.5, 0, 1)
+
+                self._compiled_generate_128 = compile_with_custom_pass(render_fn_128)
+                log.info("DECODE_128 joint graph compiled (latent 2x2 avg-pool before decode)")
         except Exception as e:
             self._compiled_generate = None
             log.info("graph pass unavailable (%s); plain generate_faces", e)

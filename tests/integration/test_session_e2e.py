@@ -62,7 +62,17 @@ def test_session_cached_path_skips_tracker(session):
     session._bg_cache = [(lm, bbox, lat)] * len(session._bg_pool)
     calls0 = session._tracker.backend.calls
     session.push_audio(np.zeros(16000 * 6, dtype=np.float32))
-    out = session.get_output_frame()
+    # The batched path pastes/emits on the worker thread — the first call can
+    # legitimately return None (PRD contract: None = not ready yet, callers
+    # poll). Poll like a production consumer instead of asserting first-call.
+    import time as _time
+
+    out = None
+    for _ in range(100):
+        out = session.get_output_frame()
+        if out is not None:
+            break
+        _time.sleep(0.01)
     assert out is not None
     assert session._tracker.backend.calls == calls0
     frame, _ = out

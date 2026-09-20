@@ -53,6 +53,9 @@ def paste_back(
 
 
 def _paste_feather(frame_bgr: np.ndarray, face: np.ndarray, bbox) -> np.ndarray:
+    # Non-mutating: input frames come from the session bg pool and are reused
+    # every loop — blending must never write into the input frame.
+    frame_bgr = frame_bgr.copy()
     x, y, x1, y1 = bbox
     ph, pw = face.shape[:2]
     fx = x1 - x
@@ -81,7 +84,9 @@ def _paste_masked(frame_bgr: np.ndarray, face: np.ndarray, bbox, mp: MaskProvide
 def _paste_alpha(frame_bgr: np.ndarray, face: np.ndarray, bbox, alpha: np.ndarray) -> np.ndarray:
     # Masked paste with a caller-provided alpha (pure cv2/numpy — safe on the
     # paste worker thread; the MLX parse backend is only touched by the
-    # provider lookup in _paste_masked on the main thread).
+    # provider lookup in _paste_masked on the main thread). Non-mutating:
+    # input frames come from the session bg pool and are reused every loop.
+    out = frame_bgr.copy()
     x, y, x1, y1 = bbox
     crop_box = _expand_crop_box(bbox, frame_bgr.shape)
     x_s, y_s, x_e, y_e = crop_box
@@ -107,8 +112,8 @@ def _paste_alpha(frame_bgr: np.ndarray, face: np.ndarray, bbox, alpha: np.ndarra
     # cv2.blendLinear: SIMD per-pixel blend, ~7x faster than numpy fp32 math
     blended = cv2.blendLinear(src, dst, af, 1.0 - af)
     crop[p_y0:p_y1, p_x0:p_x1] = blended.astype(np.uint8)
-    frame_bgr[y_s:y_e, x_s:x_e] = crop
-    return frame_bgr
+    out[y_s:y_e, x_s:x_e] = crop
+    return out
 
 
 def crop_bbox_to_xyxy(bbox) -> tuple[int, int, int, int]:

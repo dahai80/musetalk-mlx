@@ -55,6 +55,16 @@ def test_feather_mask_shape():
     assert len(crop) == 4
 
 
+def test_paste_back_does_not_mutate_input():
+    # Regression: paste_back used to write the blended region into the input
+    # frame — session bg-pool frames are reused every loop and accumulated
+    # the blended face region run over run.
+    frame = _frame()
+    face = np.full((256, 256, 3), 200, dtype=np.uint8)
+    paste_back(frame, face, (100, 100, 200, 200), mask_provider=None)
+    assert np.all(frame == 50)
+
+
 def test_crop_bbox_xyxy_conversion():
     # FaceCropper.crop emits (x, y, w, h); regression: session used to feed the
     # raw xywh into paste_back whose contract is (x1, y1, x2, y2) — x2=150 < x=217

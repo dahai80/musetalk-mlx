@@ -78,3 +78,19 @@ PRECOMPUTE = True
 # Batched hot path: one UNet + one VAE decode per BATCH steps. RTT-safe
 # (BATCH=2 adds one 33ms step; audio-to-video RTT stays <=80ms).
 BATCH = 2
+
+# Speed-over-quality decode switch (2026-09-20 decision): 2x2 average-pool the
+# UNet output latent before the VAE decoder, so the decoder runs at 128^2
+# output instead of 256^2 (decoder FLOPs scale with spatial^2: decode
+# ~38-61ms -> ~10-18ms per round on M5 Max). UNet + audio conditioning are
+# untouched. Default OFF — quality-gated (lip detail th/v/f, PSNR >= 38dB
+# gate applies to the 256 path only). Enable when GPU throughput is the
+# binding constraint and a softer face is acceptable.
+DECODE_128 = False
+
+# GIL bypass for the paste/blend CPU work (~20ms/round): run the cv2/numpy
+# blend in a child PROCESS (own GIL) so MLX's busy-wait sync on the render
+# thread cannot starve it. IPC moves only the expanded crop (~1.7MB per
+# frame round trip), not the 1080p frame. Thread-only fallback on any IPC
+# failure. Requires PASTE_MULTIPROC-capable spawn (macOS default).
+PASTE_MULTIPROC = True
