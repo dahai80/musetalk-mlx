@@ -68,7 +68,6 @@ def _paste_feather(frame_bgr: np.ndarray, face: np.ndarray, bbox) -> np.ndarray:
 
 
 def _paste_masked(frame_bgr: np.ndarray, face: np.ndarray, bbox, mp: MaskProvider) -> np.ndarray:
-    x, y, x1, y1 = bbox
     crop_box = _expand_crop_box(bbox, frame_bgr.shape)
     x_s, y_s, x_e, y_e = crop_box
     if x_e <= x_s or y_e <= y_s:
