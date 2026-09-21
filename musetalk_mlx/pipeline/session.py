@@ -3,10 +3,7 @@ import queue
 import threading
 import time
 from collections import deque
-from typing import NamedTuple
 
-import cv2
-import imageio
 import mlx.core as mx
 import numpy as np
 from fusion_mlx.video.musetalk_mlx import MuseTalkPipeline
@@ -22,17 +19,9 @@ from ..pipeline.paste_proc import PasteProcess
 from ..utils.audio import AudioWindower
 from ..utils.profiling import StageProfiler
 from ..utils.thermal import ThermalController
+from .background import BackgroundStore, BgCacheEntry  # noqa: F401 -- re-export (tests import from session)
 
 log = logging.getLogger(__name__)
-
-
-class BgCacheEntry(NamedTuple):
-    # One precomputed bg frame's pipeline state (audit 0921 P2: was a bare
-    # tuple indexed positionally `cached[2]` — NamedTuple keeps tuple
-    # compatibility but makes field order self-documenting).
-    landmarks: object
-    bbox: object
-    latent: object
 
 
 def _unet_forward(pipe, latent, chunk, steps=1):
@@ -84,19 +73,7 @@ class MuseTalkSession:
         # fast path exists (audit E2). When enabled, LCMFastSession validates
         # the pipe and raises on misuse.
         self.lcm = LCMFastSession(self.pipe) if config.LCM_ENABLED else None
-        self._bg = imageio.get_reader(str(bg_video_path))
-        self._bg_n = int(self._bg.count_frames())
-        if self._bg_n <= 0:
-            # count_frames() can report 0 for some readers; a truly empty bg
-            # video would ZeroDivision/IndexError on the modulo path. Validate
-            # eagerly so the failure is attributable (audit P1-33).
-            try:
-                _ = next(iter(self._bg))
-                self._bg_n = 1
-                self._bg.seek(0)
-            except Exception as e:
-                raise ValueError(f"bg video {bg_video_path} has no readable frames ({e})")
-        self._bg_idx = 0
+        self._bg_store = BackgroundStore(bg_video_path)
         self._windower = AudioWindower(sr=self.sr, fps=self.fps)
         # Stateful thermal controller (hysteresis, one-tier-at-a-time downgrade)
         # — the stateless thermal_tier() wrapper chatters 1<->2 on M5 Max and
@@ -113,14 +90,7 @@ class MuseTalkSession:
         self._reuse = 0
         self._audio_prefix = None  # fusion-mlx #914: prior window's tail embedding
         self.profiler = StageProfiler()
-        self._croppers = {}  # patch size -> FaceCropper (thermal ladder 256/128)
-        self._bg_pool = None  # FR-END-002: preloaded base-video frame pool
-        self._bg_cache = []  # per-frame BgCacheEntry|None precompute
-        # _bg_cache is written by _precompute_cache (reload path, currently
-        # synchronous) and read by _render/_submit_round. A lock keeps the
-        # list-reference swap atomic so a future async rebuild cannot hand the
-        # render thread a half-populated list (audit R8).
-        self._bg_cache_lock = threading.Lock()
+        self._croppers = {}  # patch 256/128 (thermal ladder); croppers dict stays on session
         self._expected_pts = None  # observability: PTS sync-deviation logging
         self._tune_mlx_memory()
         self._setup_graph_pass()
@@ -180,6 +150,41 @@ class MuseTalkSession:
             self.step,
             self.step / self.sr * 1000,
         )
+
+    # Compatibility shims (audit 0921 A-1 split): tests and internal render
+    # paths reach the bg state through these names. Reads/writes delegate to
+    # the store; the setter lazily binds a store shell so reload() unit-test
+    # shells built via __new__ keep working unchanged.
+    def _require_store(self):
+        st = self.__dict__.get("_bg_store")
+        if st is None:
+            st = BackgroundStore.__new__(BackgroundStore)
+            self._bg_store = st
+        return st
+
+    @property
+    def _bg_pool(self):
+        return self._bg_store._bg_pool
+
+    @_bg_pool.setter
+    def _bg_pool(self, v):
+        self._require_store()._bg_pool = v
+
+    @property
+    def _bg_cache(self):
+        return self._bg_store._bg_cache
+
+    @_bg_cache.setter
+    def _bg_cache(self, v):
+        self._require_store()._bg_cache = v
+
+    @property
+    def _bg_cache_lock(self):
+        return self._bg_store._bg_cache_lock
+
+    @_bg_cache_lock.setter
+    def _bg_cache_lock(self, v):
+        self._require_store()._bg_cache_lock = v
 
     @staticmethod
     def _build_pipe(weights_dir, mlx_dir):
@@ -368,7 +373,7 @@ class MuseTalkSession:
                 log.warning("paste proc stop failed (%s)", e)
             self._paste_mp = None
         try:
-            self._bg.close()
+            self._bg_store.close()
         except Exception as e:
             log.debug("bg reader close (%s)", e)
         log.info("MuseTalkSession closed")
@@ -909,106 +914,57 @@ class MuseTalkSession:
             log.warning("graph pass unavailable (%s); plain generate_faces", e)
 
     def _preload_bg(self) -> None:
-        # FR-END-002: preload the base-video frames into a memory pool (looped
-        # serving from RAM, no per-frame decode cost). CAP at BG_POOL_MAX_FRAMES
-        # — a long base video (10min = ~3.7GB at 1080p) would otherwise OOM the
-        # process at startup. Beyond the cap, serve on-demand from the imageio
-        # reader with a small LRU (audit A7).
-        frames = []
-        cap = config.BG_POOL_MAX_FRAMES
-        budget_bytes = config.BG_POOL_BUDGET_MB * 1024 * 1024
-        acc = 0
-        try:
-            for i, rgb in enumerate(self._bg):
-                if i >= cap:
-                    break
-                f = cv2.cvtColor(np.asarray(rgb), cv2.COLOR_RGB2BGR)
-                acc += f.nbytes
-                if acc > budget_bytes:
-                    log.warning(
-                        "bg pool hit byte budget %dMB at frame %d (%.0fMB); rest served on-demand (audit H4)",
-                        config.BG_POOL_BUDGET_MB,
-                        i,
-                        acc / (1024 * 1024),
-                    )
-                    break
-                frames.append(f)
-        except Exception as e:
-            # imageio v2 reader raises at stream end; keep collected frames.
-            log.debug("bg preload stopped at %d frames (%s)", len(frames), e)
-        self._bg_pool = frames
-        self._bg_n = len(frames)
-        self._bg_idx = 0
-        mb = sum(f.nbytes for f in frames) / (1024 * 1024)
-        if self._bg_n < cap:
-            log.info("bg pool preloaded %d frames (pool %.0fMB)", len(frames), mb)
-        else:
-            # Pool capped — total bg length unknown without a second pass; the
-            # on-demand path in _bg_frame handles frames beyond the pool.
-            log.warning(
-                "bg pool capped at %d frames (%.0fMB); longer bg served on-demand from reader",
-                len(frames),
-                mb,
-            )
-        if config.PRECOMPUTE and frames:
-            self._precompute_cache(frames)
+        self._bg_store.preload(self._tracker, self._cropper, self.pipe)
 
     def _precompute_cache(self, frames) -> None:
-        # MuseTalk-realtime-style offline pass: per base frame precompute
-        # landmarks, crop bbox and VAE latent once, so the hot loop skips
-        # DWPose (~100ms/frame) and VAE encode (~50ms/frame). Latents are
-        # tiny ((1,8,32,32) fp16 ≈ 16KB/frame). Live fallback kept for
-        # cache misses (idle frames, thermal patch 128).
-        cache = []
-        t0 = time.monotonic()
-        for i, fr in enumerate(frames):
-            lm = self._tracker.update(fr)
-            if lm is None:
-                cache.append(None)
-                continue
-            crop, bbox = self._cropper.crop(fr, lm)
-            lat = self.pipe.get_latents_for_unet(crop)
-            mx.eval(lat)
-            cache.append(BgCacheEntry(lm, bbox, lat))
-            if (i + 1) % 100 == 0:
-                log.info("bg cache precompute %d/%d (%.1fs)", i + 1, len(frames), time.monotonic() - t0)
-        # Atomic swap: the render thread reads self._bg_cache; assigning the
-        # fully-built list in one step under the lock means it never sees a
-        # partial list (audit R8).
-        with self._bg_cache_lock:
-            self._bg_cache = cache
-        self._tracker.fails = 0
-        self._tracker.idle = False
-        log.info(
-            "bg cache precomputed %d/%d frames in %.1fs",
-            sum(1 for c in cache if c is not None),
-            len(cache),
-            time.monotonic() - t0,
-        )
+        self._bg_store.precompute_cache(frames, self._tracker, self._cropper, self.pipe)
 
     def _bg_frame(self, downscale: int = 1):
-        # Serve from the preloaded pool (FR-END-002); looped. downscale > 1
-        # (FR-END-003 strategy C) renders the frame at reduced res then
-        # upsamples — compute saved outside the face ROI, face patch unaffected.
-        # Returns (frame_bgr, pool_index).
-        if self._bg_pool:
-            rgb = self._bg_pool[self._bg_idx % len(self._bg_pool)]
-            idx = self._bg_idx % len(self._bg_pool)
-            self._bg_idx += 1
-            if downscale > 1:
-                h, w = rgb.shape[:2]
-                small = cv2.resize(rgb, (w // downscale, h // downscale), interpolation=cv2.INTER_AREA)
-                rgb = cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
-            return rgb, idx
-        idx = self._bg_idx % self._bg_n if self._bg_n > 0 else self._bg_idx
+        return self._bg_store.get_frame(downscale)
+
+    def _setup_graph_pass(self) -> None:
+        # FR-MLX-003: consume the fusion-mlx #911/#918 graph passes when
+        # available: structural rewrite (Conv+GN+SiLU fusion) + SmartConv2d
+        # shape-dispatched conv (#919) on the module tree, then compile the
+        # joint UNet+VAE-decode forward (PE applied inside, mirroring
+        # generate_faces; generate_faces itself calls mx.eval, illegal under
+        # mx.compile). One graph for unet->decode is ~2x faster than two
+        # compiled calls (no compiled-input boundary).
+        self._compiled_generate = None
+        self._compiled_generate_128 = None
+        if not config.GRAPH_OPT:
+            log.info("graph pass disabled by config flag")
+            return
         try:
-            rgb = self._bg.get_data(idx)
-        except (IndexError, ValueError):
-            self._bg.seek(0)
-            rgb = next(self._bg)
-        self._bg_idx += 1
-        if downscale > 1:
-            h, w = rgb.shape[:2]
-            small = cv2.resize(rgb, (w // downscale, h // downscale), interpolation=cv2.INTER_AREA)
-            rgb = cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
-        return rgb, idx
+            from fusion_mlx.graph_opt import apply_patterns, apply_smart_conv, compile_with_custom_pass
+            from fusion_mlx.video.musetalk_mlx.config import UNET_TIMESTEP
+            from fusion_mlx.video.musetalk_mlx.whisper.audio2feature import apply_pe
+
+            n_pat = apply_patterns(self.pipe.unet) + apply_patterns(self.pipe.vae)
+            n_sc = 0
+            if config.SMART_CONV:
+                n_sc = apply_smart_conv(self.pipe.unet) + apply_smart_conv(self.pipe.vae)
+            log.info("graph passes: %d pattern rewrites, %d smart convs", n_pat, n_sc)
+            pipe = self.pipe
+
+            def render_fn(latent, audio):
+                pred = pipe.unet(latent, mx.array([UNET_TIMESTEP]), apply_pe(audio))
+                return mx.clip(pipe.vae.decode(pred / pipe.scaling_factor) / 2 + 0.5, 0, 1)
+
+            self._compiled_generate = compile_with_custom_pass(render_fn)
+            log.info("fusion-mlx graph pass applied to joint UNet+decode (#911/#918)")
+            if config.DECODE_128:
+
+                def render_fn_128(latent, audio):
+                    pred = pipe.unet(latent, mx.array([UNET_TIMESTEP]), apply_pe(audio))
+                    return mx.clip(pipe.vae.decode(_pool2x(pred) / pipe.scaling_factor) / 2 + 0.5, 0, 1)
+
+                self._compiled_generate_128 = compile_with_custom_pass(render_fn_128)
+                log.info("DECODE_128 joint graph compiled (latent 2x2 avg-pool before decode)")
+        except Exception as e:
+            # Clear BOTH compiled entries — a partial assignment (128 set before
+            # the main graph raised) would leave inconsistent state. Warning, not
+            # info: operators must see that graph optimization is off (audit P2-4).
+            self._compiled_generate = None
+            self._compiled_generate_128 = None
+            log.warning("graph pass unavailable (%s); plain generate_faces", e)
