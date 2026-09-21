@@ -18,9 +18,15 @@ def derive_face_bbox(face_lm: np.ndarray, upperbondrange: int = 0):
     # bbox; x from landmark x-extent, y from a half-face line (lm[29]) minus
     # half_face_dist, shifted by upperbondrange. Returns (x1,y1,x2,y2) int32
     # or None when the derived bbox is degenerate.
-    if face_lm is None or len(face_lm) <= 29:
+    if face_lm is None:
         return None
-    lm = np.asarray(face_lm, dtype=np.int32)
+    lm = np.asarray(face_lm, dtype=np.float32)
+    # Validate shape: a 1-D array or (N,3)-with-score backend would otherwise
+    # raise on lm[29,1] or silently take the wrong column (audit P1-35).
+    if lm.ndim != 2 or lm.shape[1] < 2 or lm.shape[0] <= 29:
+        log.debug("derive_face_bbox: bad landmark shape %s; fallback", lm.shape)
+        return None
+    lm = lm[:, :2].astype(np.int32)
     half_y = int(lm[29, 1])
     if upperbondrange != 0:
         half_y = upperbondrange + half_y

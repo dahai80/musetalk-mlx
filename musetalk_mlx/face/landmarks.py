@@ -1,9 +1,10 @@
 import logging
+import threading
 
 import numpy as np
 
 from .. import config
-from .dwpose import NUM_FACE_KPTS, derive_face_bbox, load_dwpose_backend
+from .dwpose import FACE_KPT_SLICE, NUM_FACE_KPTS, derive_face_bbox, load_dwpose_backend
 
 log = logging.getLogger(__name__)
 
@@ -29,8 +30,9 @@ class _KalmanSmoother:
             self._init = True
             return self.x[:, 0].copy()
         # predict: x_pos += x_vel; P = F P F^T + Q  (F=[[1,1],[0,1]])
+        # p00' = p00 + p01 + p10 + p11 + q = p00 + 2*p01 + p11 + q (p symmetric)
         self.x[:, 0] += self.x[:, 1]
-        p00 = self.p[:, 0, 0] + self.p[:, 1, 1] + self.q
+        p00 = self.p[:, 0, 0] + 2.0 * self.p[:, 0, 1] + self.p[:, 1, 1] + self.q
         p01 = self.p[:, 0, 1] + self.p[:, 1, 1]
         p11 = self.p[:, 1, 1] + self.q
         # update: H=[1,0], R=r
@@ -49,8 +51,9 @@ class _KalmanSmoother:
     def predict(self) -> np.ndarray:
         # FR-END-006: on a single-frame miss, the KF prediction (pos advanced by
         # its velocity) replaces the detection instead of freezing the last pose.
+        # p00' = p00 + 2*p01 + p11 + q (same fix as update — was missing 2*p01).
         self.x[:, 0] += self.x[:, 1]
-        self.p[:, 0, 0] += self.p[:, 1, 1] + self.q
+        self.p[:, 0, 0] += 2.0 * self.p[:, 0, 1] + self.p[:, 1, 1] + self.q
         self.p[:, 0, 1] += self.p[:, 1, 1]
         return self.x[:, 0].copy()
 
@@ -71,6 +74,12 @@ class LandmarkTracker:
         self.last = None  # smoothed (68,2) float32
         self.fails = 0
         self.idle = False
+        # KF state (x, p) is mutated in-place by update()/predict(). The
+        # precompute pass and the render thread both call update(); an async
+        # rebuild (A8 direction) would race. Guard the stateful read-modify-
+        # write so concurrent callers serialize rather than corrupt the filter
+        # (audit E4).
+        self._lock = threading.Lock()
 
     def _reject_outliers(self, pts: np.ndarray) -> np.ndarray:
         pts = np.asarray(pts, dtype=np.float32)
@@ -89,43 +98,79 @@ class LandmarkTracker:
     def detect(self, frame_bgr: np.ndarray):
         if self.backend is None:
             return None
-        return self.backend.face_landmarks(frame_bgr)
+        try:
+            return self.backend.face_landmarks(frame_bgr)
+        except Exception as e:
+            log.warning("landmark backend raised, treating as miss: %s", e)
+            return None
+
+    def _coerce_points(self, pts) -> np.ndarray | None:
+        # Validate backend output shape before use — a 5-pt or (N,3) backend
+        # would otherwise raise or silently take the wrong column (audit P1-13).
+        arr = np.asarray(pts, dtype=np.float32)
+        if arr.ndim != 2 or arr.shape[1] < 2:
+            log.warning("landmark backend returned unexpected shape %s, miss", arr.shape)
+            return None
+        # A whole-body backend returns 133 points — slice the 68 face landmarks
+        # (COCO-WholeBody 23:91) rather than taking the first 68 (audit P4-4).
+        if arr.shape[0] >= 91:
+            arr = arr[FACE_KPT_SLICE]
+        if arr.shape[0] < NUM_FACE_KPTS:
+            log.warning("landmark backend returned too few points %s, miss", arr.shape)
+            return None
+        return arr[:NUM_FACE_KPTS, :2].reshape(NUM_FACE_KPTS, 2)
 
     def update(self, frame_bgr: np.ndarray):
         pts = self.detect(frame_bgr)
-        if pts is not None:
-            smooth = self.kf.update(self._reject_outliers(pts))
-            cand = smooth.reshape(NUM_FACE_KPTS, 2)
-            if self._plausible_bbox(cand, frame_bgr.shape):
-                self.fails = 0
-                if self.idle:
-                    log.info("face re-appearing, resuming lip drive")
-                self.idle = False
-                self.last = cand
-                return self.last
-            # Numerically present but geometrically absurd (e.g. a corrupted
-            # backend emitting border-pinned coords) — same miss path as None.
-            log.warning("implausible face bbox from landmarks; treating frame as miss")
-            pts = None
-        self.fails += 1
-        if self.fails == config.KEYPOINT_FAIL_IDLE and not self.idle:
-            self.idle = True
-            log.warning("landmarks lost/implausible for %d frames, entering idle-blink state", self.fails)
-        if self.idle:
-            return None
-        if self.last is None:
-            return None
-        pred = self.kf.predict().reshape(NUM_FACE_KPTS, 2)
-        log.debug("landmark miss #%d, Kalman-predicted pose replaces detection", self.fails)
-        return pred
+        with self._lock:
+            if pts is not None:
+                cand2d = self._coerce_points(pts)
+                if cand2d is not None:
+                    cand_raw = self._reject_outliers(cand2d)
+                    # Validate geometry BEFORE injecting into the KF — a corrupted
+                    # backend emitting border-pinned coords would otherwise pollute
+                    # the filter state and every subsequent miss-prediction.
+                    if self._plausible_bbox(cand_raw, frame_bgr.shape):
+                        smooth = self.kf.update(cand_raw.reshape(-1)).reshape(NUM_FACE_KPTS, 2)
+                        self.fails = 0
+                        if self.idle:
+                            log.info("face re-appearing, resuming lip drive")
+                        self.idle = False
+                        self.last = smooth
+                        return self.last
+                    log.warning("implausible face bbox from landmarks; treating frame as miss")
+            self.fails += 1
+            if self.fails == config.KEYPOINT_FAIL_IDLE and not self.idle:
+                self.idle = True
+                log.warning("landmarks lost/implausible for %d frames, entering idle-blink state", self.fails)
+            if self.idle:
+                return None
+            if self.last is None:
+                return None
+            # Decay velocity on consecutive misses so a large last-velocity does not
+            # drift the prediction off-frame over KEYPOINT_FAIL_IDLE frames.
+            if self.fails > 1:
+                self.kf.x[:, 1] *= 0.5
+            pred = self.kf.predict().reshape(NUM_FACE_KPTS, 2)
+            log.debug("landmark miss #%d, Kalman-predicted pose replaces detection", self.fails)
+            return pred
 
     def _plausible_bbox(self, lm: np.ndarray, frame_shape) -> bool:
+        fh, fw = frame_shape[:2]
+        # Absolute sanity before bbox math: most landmarks must be inside the
+        # frame and form a non-degenerate cluster. Catches a systematically
+        # collapsed backend that median-based _reject_outliers cannot (audit P1-11).
+        in_frame = np.sum((lm[:, 0] >= 0) & (lm[:, 0] < fw) & (lm[:, 1] >= 0) & (lm[:, 1] < fh))
+        if in_frame < NUM_FACE_KPTS * 0.8:
+            log.debug("only %d/%d landmarks in frame, reject", in_frame, NUM_FACE_KPTS)
+            return False
         bbox = derive_face_bbox(lm, self.upperbondrange)
         if bbox is None:
             return False
         x1, y1, x2, y2 = bbox
-        fh, fw = frame_shape[:2]
         area = (x2 - x1) * (y2 - y1)
+        if area <= 0:
+            return False
         if area > 0.6 * fw * fh:
             log.debug("bbox area %.0f > 60%% of frame", area)
             return False

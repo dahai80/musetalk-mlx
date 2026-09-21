@@ -112,7 +112,24 @@ class SyncNetS:
 
     def load_state(self, model_path):
         torch = self.torch
-        state = torch.load(model_path, map_location="cpu", weights_only=False)
+        # weights_only=True: syncnet_v2.model is a third-party pickle —
+        # weights_only=False executes arbitrary __reduce__ payloads (RCE)
+        # (audit P0-7). Fall back to False only if the checkpoint uses legacy
+        # pickled modules AND the operator has explicitly opted in via env.
+        import os
+
+        weights_only = os.environ.get("MT_SYNCNET_UNSAFE_LOAD", "0") != "1"
+        try:
+            state = torch.load(model_path, map_location="cpu", weights_only=weights_only)
+        except Exception as e:
+            if not weights_only:
+                raise
+            log.warning(
+                "safe torch.load failed (%s); set MT_SYNCNET_UNSAFE_LOAD=1 only on a "
+                "trusted checkpoint to allow legacy unpickle",
+                e,
+            )
+            raise
         if hasattr(state, "state_dict"):
             state = state.state_dict()
         elif isinstance(state, dict) and "state_dict" in state:
@@ -128,6 +145,13 @@ class SyncNetS:
             if k in own and own[k].shape == v.shape:
                 own[k].data.copy_(v)
                 loaded += 1
+        # A near-zero partial load produces metrics on a mostly-random network
+        # — fail loudly instead of logging info and proceeding (audit fix).
+        if loaded < max(1, int(0.5 * len(own))):
+            raise RuntimeError(
+                f"syncnet: only {loaded}/{len(own)} params loaded from {model_path} "
+                f"(<50%); checkpoint may be incompatible"
+            )
         log.info("syncnet loaded %d/%d params from %s", loaded, len(own), model_path)
         return loaded, len(own)
 
@@ -167,6 +191,11 @@ def _extract_mfcc(audio_path, sr):
     _, audio = wavfile.read(audio_path)
     if audio.ndim > 1:
         audio = audio[:, 0]
+    # psf.mfcc expects float in [-1,1]; int16 magnitudes (~32767) produce
+    # scale-dependent mel coeffs that only match upstream's exact (buggy) path.
+    # Normalize — keeps parity with any librosa-based path elsewhere (audit fix).
+    if np.issubdtype(audio.dtype, np.integer):
+        audio = audio.astype(np.float32) / 32768.0
     mfcc = list(zip(*psf.mfcc(audio, sr)))
     mfcc = np.stack([np.array(i) for i in mfcc])
     cc = np.expand_dims(np.expand_dims(mfcc, axis=0), axis=0)
@@ -207,16 +236,44 @@ def evaluate_sync(video_path, model_path, device="cpu", vshift=SYNCNET_VSHIFT, b
 
     with tempfile.TemporaryDirectory() as tmp:
         img_jpg = os.path.join(tmp, "%06d.jpg")
+        # List-form subprocess: shell=True with unquoted user paths is a command
+        # injection / breakage vector (audit P0-8).
         subprocess.run(
-            f"ffmpeg -loglevel error -nostdin -y -i {video_path} -f image2 {img_jpg}",
-            shell=True,
+            [
+                "ffmpeg",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-y",
+                "-i",
+                str(video_path),
+                "-f",
+                "image2",
+                img_jpg,
+            ],
             check=True,
         )
         wav = os.path.join(tmp, "audio.wav")
         subprocess.run(
-            f"ffmpeg -loglevel error -nostdin -y -i {video_path} -async 1 -ac 1 "
-            f"-vn -acodec pcm_s16le -ar 16000 {wav}",
-            shell=True,
+            [
+                "ffmpeg",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-y",
+                "-i",
+                str(video_path),
+                "-async",
+                "1",
+                "-ac",
+                "1",
+                "-vn",
+                "-acodec",
+                "pcm_s16le",
+                "-ar",
+                "16000",
+                wav,
+            ],
             check=True,
         )
         im, _fps = _load_video_frames(video_path)
@@ -234,16 +291,19 @@ def evaluate_sync(video_path, model_path, device="cpu", vshift=SYNCNET_VSHIFT, b
         raise RuntimeError(f"video too short: {imtv.shape[2]} frames, need > {SYNCNET_VIDEO_WIN}")
 
     im_feat, cc_feat = [], []
-    for i in range(0, lastframe, batch_size):
-        upper = min(lastframe, i + batch_size)
-        im_batch = [imtv[:, :, v : v + SYNCNET_VIDEO_WIN, :, :] for v in range(i, upper)]
-        im_in = torch.cat(im_batch, 0).to(device)
-        im_out = net.forward_lip(im_in)
-        im_feat.append(im_out.data.cpu())
-        cc_batch = [cct[:, :, :, v * 4 : v * 4 + SYNCNET_AUDIO_WIN] for v in range(i, upper)]
-        cc_in = torch.cat(cc_batch, 0).to(device)
-        cc_out = net.forward_aud(cc_in)
-        cc_feat.append(cc_out.data.cpu())
+    # no_grad: eval builds a graph per forward otherwise — leaks CPU/GPU memory
+    # and slows each batch over a long video (audit fix).
+    with torch.no_grad():
+        for i in range(0, lastframe, batch_size):
+            upper = min(lastframe, i + batch_size)
+            im_batch = [imtv[:, :, v : v + SYNCNET_VIDEO_WIN, :, :] for v in range(i, upper)]
+            im_in = torch.cat(im_batch, 0).to(device)
+            im_out = net.forward_lip(im_in)
+            im_feat.append(im_out.data.cpu())
+            cc_batch = [cct[:, :, :, v * 4 : v * 4 + SYNCNET_AUDIO_WIN] for v in range(i, upper)]
+            cc_in = torch.cat(cc_batch, 0).to(device)
+            cc_out = net.forward_aud(cc_in)
+            cc_feat.append(cc_out.data.cpu())
 
     im_feat = torch.cat(im_feat, 0)
     cc_feat = torch.cat(cc_feat, 0)

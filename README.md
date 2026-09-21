@@ -32,10 +32,13 @@ base video frame -> 68-pt DWPose face landmarks -> 256x256 crop -> VAE encode
 cd musetalk-mlx
 python3.12 -m venv .venv
 source .venv/bin/activate
+# fusion-mlx neural core (editable, from its checkout):
+pip install -e ~/fusion/fusion-mlx
 pip install -e ".[dev]"
 ```
 
-The `fusion-mlx` dependency is a local `file://` pin on `~/fusion/fusion-mlx` (see `pyproject.toml`).
+`fusion-mlx[video]>=0.2.0` is a versioned dependency (no hardcoded local path);
+install the fusion-mlx checkout editable first so the version constraint is satisfied.
 
 ### Weights
 
@@ -59,6 +62,22 @@ Download via https://hf-mirror.com, or convert the MuseTalk clone's `models/` la
 | `musetalk-mlx-realtime --weights ... --video ... --livekit-url ... --token ...` | realtime: streaming → LiveKit (FR-LK-001/002) |
 | `pytest tests/ -v` | run tests |
 | `ruff check .` | lint |
+
+## Environment variables
+
+Deploy-time overrides (no repackaging needed). All are `MT_*` env vars read at import time.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `MT_LCM_ENABLED` | `false` | Phase-4 LCM stub (no effect until fusion-mlx ships distilled 1-step weights) |
+| `MT_GRAPH_OPT` | `true` | fusion-mlx #911 Conv+GN+SiLU graph-pass + joint mx.compile |
+| `MT_SMART_CONV` | `false` | fusion-mlx #919 SmartConv2d (measured 1.5x slower in-graph; off) |
+| `MT_FP16` | `true` | fp16 pipeline cast (30FPS + <=4GB budget) |
+| `MT_PRECOMPUTE` | `true` | offline landmarks+bbox+latent precompute per base frame |
+| `MT_BATCH` | `2` | batched UNet+decode depth (RTT-safe at 2) |
+| `MT_DECODE_128` | `false` | 2x2 avg-pool latent before decode (speed over quality) |
+| `MT_PASTE_MULTIPROC` | `false` | paste blend in a child process (off — no measured win, adds IPC) |
+| `MT_BG_POOL_MAX_FRAMES` | `900` | bg frame pool cap (30s@30fps); longer bg served on-demand |
 
 ## DWPose / face landmarks
 
@@ -156,6 +175,49 @@ server) and are retracted; the table above is clean-GPU.
 | [#919](https://github.com/dahai80/fusion-mlx/issues/919) | Metal conv2d fp16 throughput cliffs up to 8x between shapes — **fixed v0.10.3; SmartConv2d correct but 1.5x slower in-graph, gated off** | 3 |
 | [#920](https://github.com/dahai80/fusion-mlx/issues/920) | Default allocator cache grows unbounded, multi-second render spikes — **fixed v0.10.3** | 3 |
 | [#921](https://github.com/dahai80/fusion-mlx/issues/921) | Metal conv2d fp16 kernel cliffs — sole remaining 30FPS blocker (decode 58ms -> ~20ms needed) | 3 |
+| [#924](https://github.com/dahai80/fusion-mlx/issues/924) | MSL fused Conv+GN+SiLU kernel — open, blocks 30FPS (decode ~45ms -> ~20ms) | 3 |
+| [#927](https://github.com/dahai80/fusion-mlx/issues/927) | `set_ddim_steps` API missing — serious-tier step-cut is a no-op, thermal ladder jumps normal->critical | 3 |
+| [#928](https://github.com/dahai80/fusion-mlx/issues/928) | Public API contract — musetalk-mlx reaches into private attrs (`_dtype`/`UNET_TIMESTEP`/`apply_pe`/`unet`); version lock is a fallback, not a contract — **closed v0.10.5, migrated to `pipe.dtype`/`pipe._run_unet`** | 3 |
+| [#932](https://github.com/dahai80/fusion-mlx/issues/932) | `apply_patterns` matches 0 modules on MuseTalk UNet/VAE — pattern matcher blind to code-level GN→SiLU→Conv call sequences; sole remaining 30FPS blocker (render_eval 108ms/round, need 66ms) | 3 |
+
+## Operations runbook
+
+### Single-machine deployment (Apple Silicon, macOS 14+)
+
+1. **Prereqs**: Xcode 18.0 command-line tools, Python 3.11 venv, `brew install ffmpeg`. PyObjC required for thermal monitoring: `pip install pyobjc`. Without it the session logs a warning and runs normal-tier only (no thermal degradation).
+2. **Weights**: place under `weights/` (MuseTalk `unet.pth` ~3.2GB, `whisper-tiny`, `sd-vae-ft-mse`, `weights/eval`). Torch-free users must obtain pre-converted MLX safetensors (see Weight distribution below) — `musetalk-mlx-convert` requires a torch env and cannot run torch-free.
+3. **fusion-mlx**: install editable from its checkout (`pip install -e ~/fusion/fusion-mlx[video]`), pinned `>=0.10.2,<0.11`. Start/stop the service with `~/fusion/fusion-mlx/start.sh start|stop`.
+4. **Offline**: `musetalk-mlx-offline --weights weights --audio in.wav --video base.mp4 --out out.mp4`. Output is muxed with source audio via ffmpeg (audit B1).
+5. **Realtime (LiveKit)**: `musetalk-mlx-realtime --weights weights --video base.mp4 --livekit-url wss://... --token <jwt>`. Token is held only for connect/reconnect and dropped on close.
+6. **Auto-start (launchd)**: wrap the realtime CLI in a `~/Library/LaunchAgents/io.musetalk.mlx.plist` with `KeepAlive=true` so a crash restarts the daemon.
+
+### Monitoring / alerting
+
+- Logs are plain `logging` (stderr). For production, forward stderr to a structured sink (Loki/Cloudwatch) and alert on `ERROR`/`WARNING` rate.
+- Key signals to alert on: `bg pool hit byte budget`, `LiveKit room disconnected`, `paste worker thread exited`, `set_ddim_steps unavailable`, `thermal` tier transitions, `NSProcessInfo unavailable`.
+- `musetalk-mlx-stress` reports RSS + MLX active/cache/peak memory per sample; wire its JSON output into a 2h leak budget alert (threshold 50MB drift).
+
+### Rollback
+
+- fusion-mlx upper bound `<0.11`: a 0.11 release must be manually verified before bumping. To roll back, `pip install 'fusion-mlx[video]<0.11'` and restart.
+- `MuseTalkSession.reload(mlx_dir)` hot-swaps weights without restart; drain happens at a window boundary, standby base frames emitted mid-swap (no black screen). Not a substitute for a version rollback — use for weight refresh only.
+- **Reload fps dip (expected, not a fault)**: right after a successful reload the bg latent cache is rebuilt synchronously (DWPose + VAE encode per base frame, ~150ms/frame). Until it completes, cache misses fall back to the live encode path at roughly 6 FPS; output stays on standby base frames — no black screen, no audio drop. The dip self-heals as the cache fills (audit 0921 P1-6). Do not page on a post-reload fps warning that clears within seconds.
+
+### Weight distribution (P0 gap — not yet shipped)
+
+`weights/` is ~3.2GB and currently hand-placed. Commercial release requires one of:
+- Pre-converted MLX safetensors published to HuggingFace (mirror via https://hf-mirror.com) with a `musetalk-mlx-download` fetch script, or
+- A signed bundle distributed alongside the installer.
+
+This is an open release blocker (audit B5); `musetalk-mlx-convert` exists but needs a torch env, so torch-free end users cannot self-build today.
+
+## Threat model
+
+- **LiveKit token**: short-lived JWT held in process memory for connect + reconnect watchdog only; never logged, dropped on `close()`. Rotate per session; do not embed long-lived tokens in launchd plists — read from Keychain or a secrets manager at startup.
+- **Weights**: integrity is trust-on-first-load. `torch.load` uses `weights_only=True` (`eval/syncnet.py`); `MT_SYNCNET_UNSAFE_LOAD=1` is an explicit opt-out for dev only. Commercial builds should sign-verify the weight bundle before load (not yet implemented).
+- **User input (audio/video)**: audio is decoded via `librosa` (no code execution); video via `imageio`/`cv2`. Untrusted media should be scanned before ingest — the pipeline does not sandbox decode. For multi-tenant deployments, run each session in a seatbelt/container.
+- **IPC**: `paste_proc.py` uses pickle over a pipe, but the subprocess is spawned from `sys.executable -m` (trusted parent). No external input crosses the pickle boundary.
+- **subprocess**: all shell calls (`ffmpeg`/`ffprobe`) are list-form, no `shell=True`.
 
 ## Layout
 

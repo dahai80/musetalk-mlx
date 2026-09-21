@@ -1,5 +1,6 @@
 import argparse
 import logging
+import subprocess
 import sys
 from pathlib import Path
 
@@ -7,6 +8,63 @@ import imageio
 import librosa
 
 log = logging.getLogger(__name__)
+
+
+def _mux_audio(video_path: Path, audio_path: str, fps: int) -> None:
+    # imageio writes a video-only stream; a lip-sync product without audio is
+    # useless (audit B1). Mux the source audio in via ffmpeg (list-form, no
+    # shell). Mirrors eval._ensure_audio. -shortest trims audio to video length.
+    if not Path(audio_path).exists():
+        log.warning("source audio %s missing; output stays video-only", audio_path)
+        return
+    has_audio = (
+        subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "a",
+                "-show_entries",
+                "stream=index",
+                "-of",
+                "csv=p=0",
+                str(video_path),
+            ],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        != ""
+    )
+    if has_audio:
+        log.info("output already has audio; skip mux")
+        return
+    tmp = video_path.with_suffix(".muxed.mp4")
+    cmd = [
+        "ffmpeg",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-y",
+        "-i",
+        str(video_path),
+        "-i",
+        audio_path,
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+        "-shortest",
+        str(tmp),
+    ]
+    log.info("muxing source audio %s into %s", audio_path, video_path)
+    subprocess.run(cmd, check=True)
+    tmp.replace(video_path)
+    log.info("audio muxed -> %s", video_path)
 
 
 def main() -> int:
@@ -60,6 +118,7 @@ def main() -> int:
     if tail > 0:
         log.warning("%.2fs trailing audio left unprocessed (< 1 window)", tail)
     log.info("wrote %d frames (%.1fs) to %s", n, n / a.fps, out_path)
+    _mux_audio(out_path, a.audio, a.fps)
     return 0
 
 

@@ -27,7 +27,13 @@ def psnr(a, b, data_range=None):
     a = np.asarray(a, dtype=np.float64)
     b = np.asarray(b, dtype=np.float64)
     if data_range is None:
-        data_range = float(max(a.max(), b.max()) - min(a.min(), b.min()))
+        # Auto-deriving data_range from the sample extrema inflates PSNR for
+        # uint8 frames whose actual range is <255 (e.g. 180 -> +3dB), which can
+        # cross the 38dB gate falsely. Default to 255 for uint8 (audit P1-19).
+        if a.dtype == np.uint8 or b.dtype == np.uint8 or np.max([a.max(), b.max()]) <= 255:
+            data_range = 255.0
+        else:
+            data_range = float(max(a.max(), b.max()) - min(a.min(), b.min()))
     mse = np.mean((a - b) ** 2)
     if mse == 0:
         return 999.0
@@ -40,11 +46,17 @@ def ssim(a, b, data_range=None, channel_axis=-1):
     a = np.asarray(a)
     b = np.asarray(b)
     if data_range is None:
-        data_range = float(max(a.max(), b.max()) - min(a.min(), b.min()))
+        if a.dtype == np.uint8 or b.dtype == np.uint8 or np.max([a.max(), b.max()]) <= 255:
+            data_range = 255.0
+        else:
+            data_range = float(max(a.max(), b.max()) - min(a.min(), b.min()))
     return float(structural_similarity(a, b, data_range=data_range, channel_axis=channel_axis))
 
 
-def _video_frames(path):
+def _video_frames(path, max_frames=None):
+    # Materializing every frame OOMs on long eval videos. Callers that only need
+    # a per-frame metric should pass max_frames; csim path streams via
+    # _iter_video_frames instead (audit P1-18).
     import cv2
 
     cap = cv2.VideoCapture(str(path))
@@ -54,38 +66,67 @@ def _video_frames(path):
         if not ret:
             break
         frames.append(f)
+        if max_frames and len(frames) >= max_frames:
+            break
     cap.release()
     return frames
 
 
+def _iter_video_frames(path, max_frames=None):
+    import cv2
+
+    cap = cv2.VideoCapture(str(path))
+    i = 0
+    while True:
+        ret, f = cap.read()
+        if not ret:
+            break
+        yield f
+        i += 1
+        if max_frames and i >= max_frames:
+            break
+    cap.release()
+
+
 def video_psnr_ssim(gt_path, pred_path, max_frames=None):
-    gt = _video_frames(gt_path)
-    pred = _video_frames(pred_path)
-    n = min(len(gt), len(pred))
-    if max_frames:
-        n = min(n, max_frames)
+    # Stream pairwise so two long videos don't both sit fully in RAM. Per-frame
+    # PSNR/SSIM only needs the current pair (audit P1-18).
+    import cv2
+
+    cap_gt = cv2.VideoCapture(str(gt_path))
+    cap_pr = cv2.VideoCapture(str(pred_path))
+    ps, ss, n = [], [], 0
+    try:
+        while True:
+            rg, fg = cap_gt.read()
+            rp, fp = cap_pr.read()
+            if not rg or not rp:
+                break
+            ps.append(psnr(fg, fp, data_range=255.0))
+            ss.append(ssim(fg, fp, data_range=255.0))
+            n += 1
+            if max_frames and n >= max_frames:
+                break
+    finally:
+        cap_gt.release()
+        cap_pr.release()
     if n == 0:
         return 999.0, 1.0, 0
-    ps, ss = [], []
-    for i in range(n):
-        ps.append(psnr(gt[i], pred[i], data_range=255.0))
-        ss.append(ssim(gt[i], pred[i], data_range=255.0))
     return float(np.mean(ps)), float(np.mean(ss)), n
 
 
 # --------------------------------------------------------------------------- #
 # face identity cosine similarity (arcface via insightface; torch env)
 # --------------------------------------------------------------------------- #
-def _arcface_embed(video_path, app=None):
-    # Returns mean identity embedding over detected faces. Uses insightface
-    # arcface (buffalo_l). app is an insightface FaceAnalysis instance.
+def _arcface_embed(video_path, app=None, max_frames=None):
+    # Returns mean identity embedding over detected faces. Streams frames so a
+    # long eval video doesn't OOM before reaching the mean (audit P1-18).
     import cv2
 
     if app is None:
         app = _default_arcface_app()
-    frames = _video_frames(video_path)
     embeds = []
-    for f in frames:
+    for f in _iter_video_frames(video_path, max_frames=max_frames):
         rgb = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
         faces = app.get(rgb)
         if faces:
@@ -103,9 +144,9 @@ def _default_arcface_app():
     return app
 
 
-def csim(gt_path, pred_path, app=None):
-    g = _arcface_embed(gt_path, app)
-    p = _arcface_embed(pred_path, app)
+def csim(gt_path, pred_path, app=None, max_frames=None):
+    g = _arcface_embed(gt_path, app, max_frames=max_frames)
+    p = _arcface_embed(pred_path, app, max_frames=max_frames)
     if g is None or p is None:
         return 0.0
     cos = float(np.dot(g, p) / (np.linalg.norm(g) * np.linalg.norm(p)))

@@ -30,10 +30,12 @@ MuseTalk 1.5 唇形同步数字人，运行于 Apple Silicon。K12 英语外教�
 cd musetalk-mlx
 python3.12 -m venv .venv
 source .venv/bin/activate
+# 先装 fusion-mlx 神经底座（editable，从其检出目录）：
+pip install -e ~/fusion/fusion-mlx
 pip install -e ".[dev]"
 ```
 
-`fusion-mlx` 依赖通过 `file://` 指向 `~/fusion/fusion-mlx`（见 `pyproject.toml`）。
+`fusion-mlx[video]>=0.2.0` 为版本化依赖（无硬编码本地路径）；先 editable 安装 fusion-mlx 检出目录以满足版本约束。
 
 ### 权重
 
@@ -57,6 +59,22 @@ weights/
 | `musetalk-mlx-realtime --weights ... --video ... --livekit-url ... --token ...` | 实时：流式 → LiveKit（FR-LK-001/002） |
 | `pytest tests/ -v` | 运行测试 |
 | `ruff check .` | lint |
+
+## 环境变量
+
+部署时覆盖（无需重新打包），均为 import 时读取的 `MT_*` 变量。
+
+| 变量 | 默认 | 用途 |
+|---|---|---|
+| `MT_LCM_ENABLED` | `false` | Phase-4 LCM 桩（fusion-mlx 发布蒸馏 1-step 权重前无效果） |
+| `MT_GRAPH_OPT` | `true` | fusion-mlx #911 Conv+GN+SiLU 图改写 + 联合 mx.compile |
+| `MT_SMART_CONV` | `false` | fusion-mlx #919 SmartConv2d（图内测得慢 1.5x，关） |
+| `MT_FP16` | `true` | fp16 管线转换（30FPS + <=4GB 预算） |
+| `MT_PRECOMPUTE` | `true` | 离线预计算 landmarks+bbox+latent |
+| `MT_BATCH` | `2` | 批量 UNet+decode 深度（2 在 RTT 预算内） |
+| `MT_DECODE_128` | `false` | 解码前 2x2 均值池化 latent（速度优先） |
+| `MT_PASTE_MULTIPROC` | `false` | 子进程做 paste 融合（关——无测得收益，增 IPC） |
+| `MT_BG_POOL_MAX_FRAMES` | `900` | 底片帧池上限（30s@30fps）；超长底片按需读取 |
 
 ## DWPose / 人脸关键点
 
@@ -146,6 +164,49 @@ fusion-mlx 服务器污染，已撤回；上表为干净 GPU 数字。
 | [#919](https://github.com/dahai80/fusion-mlx/issues/919) | Metal conv2d fp16 吞吐悬崖 — **v0.10.3 已修；SmartConv2d 数值正确但图内慢 1.5×，默认关** | 3 |
 | [#920](https://github.com/dahai80/fusion-mlx/issues/920) | 默认 allocator cache 无界增长 — **v0.10.3 已修** | 3 |
 | [#921](https://github.com/dahai80/fusion-mlx/issues/921) | Metal conv2d fp16 kernel 悬崖 — 30FPS 最后阻塞项（decode 58ms 需降到 ~20ms） | 3 |
+| [#924](https://github.com/dahai80/fusion-mlx/issues/924) | MSL fused Conv+GN+SiLU kernel — open，阻塞 30FPS（decode ~45ms 需降到 ~20ms） | 3 |
+| [#927](https://github.com/dahai80/fusion-mlx/issues/927) | `set_ddim_steps` API 缺失 — serious 档 step-cut 空操作，温控阶梯 normal→critical 直跳 | 3 |
+| [#928](https://github.com/dahai80/fusion-mlx/issues/928) | 公共 API 契约 — musetalk-mlx 访问私有属性（`_dtype`/`UNET_TIMESTEP`/`apply_pe`/`unet`）；版本锁是兜底非契约 — **v0.10.5 已闭，迁移到 `pipe.dtype`/`pipe._run_unet`** | 3 |
+| [#932](https://github.com/dahai80/fusion-mlx/issues/932) | `apply_patterns` 在 MuseTalk UNet/VAE 上 0 匹配 — pattern matcher 看不到代码级 GN→SiLU→Conv 调用序列；30FPS 最后阻塞项（render_eval 108ms/round，需 66ms） | 3 |
+
+## 运维 runbook
+
+### 单机部署（Apple Silicon，macOS 14+）
+
+1. **前置依赖**：Xcode 18.0 命令行工具、Python 3.11 venv、`brew install ffmpeg`。温控监测需 PyObjC：`pip install pyobjc`。缺失时 session 打 warning，仅跑 normal 档（无温控降级）。
+2. **权重**：放在 `weights/`（MuseTalk `unet.pth` ~3.2GB、`whisper-tiny`、`sd-vae-ft-mse`、`weights/eval`）。torch-free 用户须获取预转换 MLX safetensors（见下文权重分发），`musetalk-mlx-convert` 需 torch 环境，torch-free 下无法自建。
+3. **fusion-mlx**：从 checkout 可编辑安装（`pip install -e ~/fusion/fusion-mlx[video]`），锁定 `>=0.10.2,<0.11`。起停服务用 `~/fusion/fusion-mlx/start.sh start|stop`。
+4. **离线**：`musetalk-mlx-offline --weights weights --audio in.wav --video base.mp4 --out out.mp4`。输出经 ffmpeg mux 源音频（审计 B1）。
+5. **实时（LiveKit）**：`musetalk-mlx-realtime --weights weights --video base.mp4 --livekit-url wss://... --token <jwt>`。token 仅供 connect/重连持有，close 时丢弃。
+6. **自启（launchd）**：把实时 CLI 包进 `~/Library/LaunchAgents/io.musetalk.mlx.plist`，`KeepAlive=true` 让崩溃后自动拉起。
+
+### 监控 / 告警
+
+- 日志为纯 `logging`（stderr）。生产环境把 stderr 转发到结构化 sink（Loki/Cloudwatch），对 `ERROR`/`WARNING` 速率告警。
+- 关键告警信号：`bg pool hit byte budget`、`LiveKit room disconnected`、`paste worker thread exited`、`set_ddim_steps unavailable`、`thermal` 档位转换、`NSProcessInfo unavailable`。
+- `musetalk-mlx-stress` 每采样报 RSS + MLX active/cache/peak 内存；把其 JSON 输出接入 2h 泄漏预算告警（阈值 50MB 漂移）。
+
+### 回滚
+
+- fusion-mlx 上界 `<0.11`：0.11 发布须手动验证后才能 bump。回滚用 `pip install 'fusion-mlx[video]<0.11'` 后重启。
+- `MuseTalkSession.reload(mlx_dir)` 热替换权重不重启；在窗口边界 drain，swap 中发 standby 底片帧（不黑屏）。不能替代版本回滚，仅用于权重刷新。
+- **reload 后掉帧（预期行为，非故障）**：reload 成功后会同步重建 bg latent 缓存（逐底片帧 DWPose + VAE encode，约 150ms/帧）。缓存重建完成前，cache-miss 走实时 encode 兜底路径，帧率约 6 FPS；输出保持 standby 底片帧——不黑屏、不丢音频。掉帧随缓存填充自愈（审计 0921 P1-6）。reload 后数秒内自行恢复的 fps 告警不必告警处理。
+
+### 权重分发（P0 缺口 — 未交付）
+
+`weights/` ~3.2GB，当前手工放置。商用发布需满足以下之一：
+- 预转换 MLX safetensors 发布到 HuggingFace（镜像走 https://hf-mirror.com），配 `musetalk-mlx-download` 拉取脚本，或
+- 随安装包分发的签名 bundle。
+
+此项为发布阻塞（审计 B5）；`musetalk-mlx-convert` 存在但需 torch 环境，torch-free 终端用户当前无法自建。
+
+## 威胁模型
+
+- **LiveKit token**：短期 JWT，仅在进程内存中供 connect + 重连看门狗持有；绝不入日志，`close()` 时丢弃。每会话轮换；勿在 launchd plist 内嵌长效 token —— 启动时从 Keychain 或 secrets manager 读取。
+- **权重**：首次加载信任。`torch.load` 用 `weights_only=True`（`eval/syncnet.py`）；`MT_SYNCNET_UNSAFE_LOAD=1` 仅为开发显式 opt-out。商用 bundle 应在加载前签名校验（尚未实现）。
+- **用户输入（音频/视频）**：音频经 `librosa` 解码（无代码执行）；视频经 `imageio`/`cv2`。不可信媒体应在入库前扫描 —— 管线不沙箱化解码。多租户部署应每会话跑在 seatbelt/容器内。
+- **IPC**：`paste_proc.py` 用 pickle 经 pipe 传输，但子进程由 `sys.executable -m` spawn（可信父进程）。无外部输入跨越 pickle 边界。
+- **subprocess**：所有 shell 调用（`ffmpeg`/`ffprobe`）为 list 形式，无 `shell=True`。
 
 ## 目录结构
 

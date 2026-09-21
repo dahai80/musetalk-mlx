@@ -1,7 +1,6 @@
 import argparse
 import logging
 import sys
-import time
 
 import librosa
 
@@ -26,28 +25,54 @@ def main() -> int:
 
     session = MuseTalkSession(a.weights, a.video, fps=a.fps, mlx_dir=a.mlx_dir)
     adapter = LiveKitAdapter(a.livekit_url, a.token, width=a.width, height=a.height, fps=a.fps)
+    # Barge-in (audit 0921 P3): SIGUSR1 triggers interrupt() for manual E2E
+    # testing. Host apps call session.interrupt()/adapter interrupt hook
+    # directly; VAD-based auto-trigger is a future item.
+    import signal
+
+    def _barge_in(_sig, _frm):
+        session.interrupt()
+
+    signal.signal(signal.SIGUSR1, _barge_in)
+    # PTS domain: the windower derives output PTS from consumed audio samples
+    # (relative 0). Mixing a file source (--audio, relative 0) with inbound
+    # LiveKit audio (real-time PTS) would make output PTS discontinuous and
+    # break the LiveKit encoder. Enforce a SINGLE audio source; if both are
+    # supplied, prefer LiveKit inbound and warn (audit E9).
+    audio_source = "livekit" if a.audio is None else "file"
+    if a.audio is not None:
+        log.warning(
+            "--audio file source active: output PTS is sample-relative (0-based). "
+            "Do NOT also feed inbound LiveKit audio — PTS domain mismatch (audit E9)."
+        )
     adapter.set_audio_callback(lambda pcm, pts: session.push_audio(pcm))
     adapter.connect()
-    log.info("realtime session up; feeding audio -> LiveKit")
+    if not adapter.wait_ready(timeout_s=5.0):
+        log.error("LiveKit adapter not ready after 5s; aborting")
+        adapter.close()
+        session.close()
+        return 1
+    log.info("realtime session up; audio source=%s -> LiveKit", audio_source)
 
     if a.audio:
         wav, _ = librosa.load(a.audio, sr=16000)
         session.push_audio(wav)
 
-    period = 1.0 / a.fps
+    from musetalk_mlx.pipeline.pacing import PacedPublisher
+
+    # Push model (audit 0921 A-4): deadline-driven pacing replaces the pull
+    # loop's idle sleep — no busy wait, overrun accounting, jitter report.
+    pacer = PacedPublisher(a.fps, report_path="results/realtime_pacing.json")
+    pacer.start()
     try:
         while True:
-            out = session.get_output_frame()
-            if out is None:
-                time.sleep(period * 0.5)
-                continue
-            frame, pts = out
-            adapter.publish_frame(frame, pts)
-            log.debug("published pts=%.3fs", pts)
+            pacer.tick(session.get_output_frame, adapter.publish_frame)
     except KeyboardInterrupt:
         log.info("stopping")
     finally:
+        pacer.write_report()
         adapter.close()
+        session.close()
     return 0
 
 

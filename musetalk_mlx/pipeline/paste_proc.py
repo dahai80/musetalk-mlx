@@ -1,5 +1,6 @@
 import logging
 import pickle
+import select
 import subprocess as sp
 import sys
 
@@ -8,10 +9,21 @@ from .blending import _paste_alpha
 
 log = logging.getLogger(__name__)
 
+# IPC read timeout: a blocked read on the child stdout (child GC pause, pipe
+# buffer full, SIGSTOP) would hang the paste worker forever and let the
+# bounded paste_q fill -> OOM. Time out and treat as proc-down (audit P0-4).
+_RECV_TIMEOUT_S = 5.0
+
+# Wire protocol version (audit 0921 M-10): parent and child may come from
+# different installed versions; without a version byte a mismatched pair
+# would silently misparse frames. Bump on any frame-layout change.
+_PROTO_VERSION = 1
+
 
 def _send(w, obj) -> None:
-    # 4-byte big-endian length + pickled payload over a binary pipe.
+    # 1-byte protocol version + 4-byte big-endian length + pickled payload.
     data = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
+    w.write(bytes((_PROTO_VERSION,)))
     w.write(len(data).to_bytes(4, "big"))
     w.write(data)
     w.flush()
@@ -19,9 +31,12 @@ def _send(w, obj) -> None:
 
 def _recv(r):
     # None on clean EOF (child gone) — caller treats as proc-down.
-    hdr = r.read(4)
-    if not hdr:
+    ver = r.read(1)
+    if not ver:
         return None
+    if ver[0] != _PROTO_VERSION:
+        raise OSError(f"paste proc protocol version mismatch: got {ver[0]}, expected {_PROTO_VERSION}")
+    hdr = r.read(4)
     if len(hdr) < 4:
         raise OSError("short header from paste proc")
     n = int.from_bytes(hdr, "big")
@@ -68,6 +83,8 @@ class PasteProcess:
         self._r = None
         self._proc = None
         self._dead = False
+        self._restarts = 0
+        self._max_restarts = 2  # bounded: after this, permanent fallback (audit P2-2)
 
     def start(self):
         self._proc = sp.Popen(
@@ -77,7 +94,26 @@ class PasteProcess:
         )
         self._w = self._proc.stdin
         self._r = self._proc.stdout
+        self._dead = False
         log.info("paste proc started pid=%d", self._proc.pid)
+
+    def _try_restart(self) -> bool:
+        # A single transient IPC error should not permanently lose the GIL
+        # bypass. Try to restart the child (bounded); on exhaustion, stay dead
+        # and the worker falls back to in-process paste (audit P2-2).
+        if self._restarts >= self._max_restarts:
+            log.warning("paste proc restart limit reached (%d); permanent fallback", self._restarts)
+            return False
+        try:
+            self.stop()
+            self._restarts += 1
+            self.start()
+            log.info("paste proc restarted (attempt %d)", self._restarts)
+            return True
+        except Exception as e:
+            log.warning("paste proc restart failed (%s)", e)
+            self._dead = True
+            return False
 
     def paste(self, frame, face, bbox, alpha):
         # Returns a NEW blended frame (input untouched) or None when the
@@ -93,9 +129,15 @@ class PasteProcess:
         bbox_local = (int(x - x_s), int(y - y_s), int(x1 - x_s), int(y1 - y_s))
         try:
             _send(self._w, ("job", crop, face, bbox_local, alpha))
+            # Time-bounded read: a blocked child must not hang the worker.
+            rdy, _, _ = select.select([self._r], [], [], _RECV_TIMEOUT_S)
+            if not rdy:
+                raise OSError(f"paste proc read timeout ({_RECV_TIMEOUT_S}s)")
             kind, payload = _recv(self._r)
         except (OSError, EOFError, BrokenPipeError, ValueError) as e:
-            log.warning("paste proc down (%s); thread-only paste", e)
+            log.warning("paste proc down (%s); attempting restart", e)
+            if self._try_restart():
+                return None  # caller falls back this frame; next frame uses the new child
             self._dead = True
             return None
         if kind != "ok":

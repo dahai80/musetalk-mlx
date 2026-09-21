@@ -7,7 +7,8 @@ from pathlib import Path
 
 import librosa
 
-from musetalk_mlx.utils.profiling import max_contiguous_alloc, phys_footprint
+from musetalk_mlx import config
+from musetalk_mlx.utils.profiling import max_contiguous_alloc, mlx_memory_breakdown, phys_footprint
 
 log = logging.getLogger(__name__)
 
@@ -42,28 +43,44 @@ def main() -> int:
     last_push = time.monotonic()
     leak = -1
     ok = False
+    # Backpressure: re-push only when the windower buffer is actually draining
+    # (not on every transient window boundary), and rate-limit to wall-clock
+    # cadence so consumed does not run ahead of real time and corrupt PTS
+    # observations (audit fix). One chunk (sr*1s) per second keeps the stream
+    # continuous without unbounded _pending growth.
+    chunk = wav[: config.SR] if wav.size >= config.SR else wav
     while time.monotonic() < deadline:
         out = session.get_output_frame()
         if out is not None:
             frames += 1
         now = time.monotonic()
         if now - last_push >= 1.0:
-            session.push_audio(wav)  # loop the audio for a continuous stream
+            session.push_audio(chunk)
             last_push = now
         if now - t0 >= 60 * len(samples):
             mem = phys_footprint()
             frag_ok = max_contiguous_alloc(probe_bytes)
-            samples.append({"minute": len(samples) + 1, "mem_mb": mem // 1024**2, "frag_ok": frag_ok})
+            mlx = mlx_memory_breakdown()
+            samples.append(
+                {
+                    "minute": len(samples) + 1,
+                    "mem_mb": mem // 1024**2,
+                    "frag_ok": frag_ok,
+                    "mlx_active_mb": mlx["active"] // 1024**2,
+                    "mlx_cache_mb": mlx["cache"] // 1024**2,
+                }
+            )
             log.info(
-                "minute %d: mem=%dMB frag(%dMB)=%s frames=%d",
+                "minute %d: phys=%dMB mlx(active=%dMB cache=%dMB) frag(%dMB)=%s frames=%d",
                 len(samples),
                 mem // 1024**2,
+                mlx["active"] // 1024**2,
+                mlx["cache"] // 1024**2,
                 a.probe_mb,
                 frag_ok,
                 frames,
             )
-        if frames and not session._pending and session._windower.buf.size == 0 and frames > 0:
-            session.push_audio(wav)
+    session.close()
     elapsed = time.monotonic() - t0
     if len(samples) >= 2:
         leak = samples[-1]["mem_mb"] - samples[1]["mem_mb"]

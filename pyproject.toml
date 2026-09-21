@@ -19,10 +19,21 @@ classifiers = [
 
 # Neural core (UNet / SD-VAE / Whisper-tiny + MuseTalkPipeline) lives in the
 # fusion-mlx foundation: fusion_mlx.video.musetalk_mlx. The [video] extra
-# brings opencv/librosa/imageio. Local file:// pin for dev — switch to the
-# PyPI release once fusion-mlx publishes a version with musetalk_mlx >= 0.2.0.
+# brings opencv/librosa/imageio.
+#
+# P0-9: the hardcoded file:///Users/dahai/... local pin made the wheel
+# non-installable on any other machine and leaked an absolute path into
+# metadata. Dev installs against a local fusion-mlx checkout now go through the
+# FUSION_MLX_PATH env var (see Makefile / install instructions); published
+# wheels depend on the versioned PyPI spec below. The env-driven local pin is
+# injected at install time by setup.py, NOT baked into static metadata.
 dependencies = [
-    "fusion-mlx[video] @ file:///Users/dahai/fusion/fusion-mlx",
+    # Upper bound: musetalk-mlx reaches into fusion-mlx internals (UNET_TIMESTEP,
+    # apply_pe, pipe._dtype/unet/vae/scaling_factor) that are NOT a public
+    # contract. A minor bump that renames any of these silently breaks the
+    # session. Pin <0.11 until fusion-mlx promotes these to a stable surface
+    # (tracked upstream); bump the upper bound only after an integration sweep.
+    "fusion-mlx[video]>=0.10.2,<0.11",
 ]
 
 [project.optional-dependencies]

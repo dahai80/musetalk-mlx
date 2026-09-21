@@ -2,6 +2,10 @@ import mlx.core as mx
 import numpy as np
 import pytest
 
+# session.py imports fusion_mlx at module level; skip (not error) on machines
+# without the base package so the suite stays green (audit 0921 P1-5).
+pytest.importorskip("fusion_mlx")
+
 from musetalk_mlx import config
 from musetalk_mlx.pipeline.session import _pool2x
 
@@ -10,7 +14,7 @@ def test_pool2x_values():
     z = mx.array(np.arange(16, dtype=np.float32).reshape(1, 1, 4, 4))
     out = _pool2x(z)
     assert out.shape == (1, 1, 2, 2)
-    np.testing.assert_allclose(np.array(out), [[[ [2.5, 4.5], [10.5, 12.5] ]]])
+    np.testing.assert_allclose(np.array(out), [[[[2.5, 4.5], [10.5, 12.5]]]])
 
 
 def test_pool2x_batch_and_channels():

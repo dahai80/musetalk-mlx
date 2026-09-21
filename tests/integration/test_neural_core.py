@@ -1,18 +1,19 @@
 import logging
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 log = logging.getLogger(__name__)
 
-WEIGHTS = Path("/tmp/mtlk_mlx_dist")
-VIDEO = Path("/Users/dahai/migration/MuseTalk/data/video/sun.mp4")
-AUDIO = Path("/Users/dahai/migration/MuseTalk/data/audio/eng.wav")
+from tests.paths import DIST, TEST_AUDIO, TEST_VIDEO  # noqa: E402
+
+WEIGHTS = DIST
+VIDEO = TEST_VIDEO
+AUDIO = TEST_AUDIO
 
 pytestmark = pytest.mark.skipif(
     not WEIGHTS.exists(),
-    reason="MLX dist at /tmp/mtlk_mlx_dist not built (run convert step)",
+    reason="MLX dist missing (set MT_MLX_DIST or provide repo weights-mlx/)",
 )
 
 

@@ -1,18 +1,21 @@
 import logging
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 from musetalk_mlx.face.landmarks import LandmarkTracker
+from musetalk_mlx.pipeline.session import BgCacheEntry
+from tests.paths import DIST, TEST_AUDIO, TEST_VIDEO
 
 log = logging.getLogger(__name__)
 
-WEIGHTS = Path("/tmp/mtlk_mlx_dist")
-VIDEO = Path("/Users/dahai/migration/MuseTalk/data/video/sun.mp4")
-AUDIO = Path("/Users/dahai/migration/MuseTalk/data/audio/eng.wav")
+WEIGHTS = DIST
+VIDEO = TEST_VIDEO
+AUDIO = TEST_AUDIO
 
-pytestmark = pytest.mark.skipif(not WEIGHTS.exists(), reason="MLX dist at /tmp/mtlk_mlx_dist not built")
+pytestmark = pytest.mark.skipif(
+    not WEIGHTS.exists(), reason="MLX dist missing (set MT_MLX_DIST or provide repo weights-mlx/)"
+)
 
 
 class _StubLandmarkBackend:
@@ -59,7 +62,7 @@ def test_session_cached_path_skips_tracker(session):
     crop, bbox = session._cropper.crop(session._bg_pool[0], lm)
     lat = session.pipe.get_latents_for_unet(crop)
     mx.eval(lat)
-    session._bg_cache = [(lm, bbox, lat)] * len(session._bg_pool)
+    session._bg_cache = [BgCacheEntry(lm, bbox, lat)] * len(session._bg_pool)
     calls0 = session._tracker.backend.calls
     session.push_audio(np.zeros(16000 * 6, dtype=np.float32))
     # The batched path pastes/emits on the worker thread — the first call can

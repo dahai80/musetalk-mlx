@@ -92,6 +92,10 @@ def crop_face_video(video_path, out_path, app=None, expand=CROP_SCALE, size=224,
     cs = expand
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(str(out_path), fourcc, target_fps, (size, size))
+    if not writer.isOpened():
+        # Codec unavailable / path unwritable — writer.write is a silent no-op
+        # and downstream syncnet runs on a zero-byte video (audit fix).
+        raise RuntimeError(f"cv2.VideoWriter failed to open {out_path} (mp4v codec?)")
     for fidx, image in enumerate(resampled):
         bs = bs_s[fidx]
         bsi = int(bs * (1 + 2 * cs))
@@ -128,10 +132,29 @@ def crop_face_video(video_path, out_path, app=None, expand=CROP_SCALE, size=224,
 
     tmp = str(out_path) + ".tmp.mp4"
     Path(tmp).write_bytes(b"")
+    # List-form: shell=True with unquoted paths is an injection vector (audit P0-8).
     subprocess.run(
-        f"ffmpeg -loglevel error -nostdin -y -i {out_path} -i {video_path} "
-        f"-c:v copy -c:a aac -map 0:v:0 -map 1:a:0? -shortest {tmp}",
-        shell=True,
+        [
+            "ffmpeg",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-y",
+            "-i",
+            str(out_path),
+            "-i",
+            str(video_path),
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0?",
+            "-shortest",
+            tmp,
+        ],
         check=False,
     )
     if Path(tmp).stat().st_size > 0:

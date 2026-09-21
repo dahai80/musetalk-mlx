@@ -28,6 +28,17 @@ class _StubPipe:
 
         return _m.zeros((latent.shape[0], 4, 32, 32))
 
+    def _run_unet(self, latent, audio, steps=1):
+        # #928 public render core (stub mirrors fusion-mlx surface)
+        return self.unet(latent, None, audio)
+
+    @property
+    def dtype(self):
+        # #928 public dtype accessor (mirrors fusion-mlx default float32)
+        import mlx.core as _m
+
+        return _m.float32
+
     def decode_latents(self, pred):
         import mlx.core as _m
 

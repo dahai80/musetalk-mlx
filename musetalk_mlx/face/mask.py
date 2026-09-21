@@ -1,4 +1,5 @@
 import logging
+import threading
 
 import cv2
 import numpy as np
@@ -66,6 +67,10 @@ class FaceParseMask(MaskProvider):
         self.backend = backend
         self._cache_key = None
         self._cache_mask = None
+        # _cache_mask/_cache_key are written on the render thread and read by
+        # mouth_mask_cached_only on the paste worker thread — guard the swap
+        # (audit P1-17). Whole-tuple replacement keeps the read consistent.
+        self._cache_lock = threading.Lock()
 
     def mouth_mask(self, frame_bgr: np.ndarray, face_box):
         crop_box = _expand_crop_box(face_box, frame_bgr.shape)
@@ -74,43 +79,57 @@ class FaceParseMask(MaskProvider):
         if ph <= 0 or pw <= 0:
             return np.zeros((0, 0), dtype=np.float32), crop_box
         key = (pw, ph, x_s, y_s)
+        with self._cache_lock:
+            cached_mask = self._cache_mask
+            cached_key = self._cache_key
         if (
-            self._cache_mask is not None
-            and self._cache_key is not None
-            and self._cache_key[:2] == key[:2]
-            and abs(self._cache_key[2] - key[2]) <= self.MASK_CACHE_TOL
-            and abs(self._cache_key[3] - key[3]) <= self.MASK_CACHE_TOL
+            cached_mask is not None
+            and cached_key is not None
+            and cached_key[:2] == key[:2]
+            and abs(cached_key[2] - key[2]) <= self.MASK_CACHE_TOL
+            and abs(cached_key[3] - key[3]) <= self.MASK_CACHE_TOL
         ):
-            return self._cache_mask, crop_box
-        labels, _face_mask = self.backend.parse(frame_bgr[y_s:y_e, x_s:x_e])
+            # Tighten the tolerance: a 4px drift re-uses a mask computed at the
+            # old position, which shifts the mouth alpha up to 4px (audit P1-15).
+            # Re-fetch when the shift exceeds 2px so the alpha tracks the face.
+            return cached_mask, crop_box
+        # parse() is a model call — wrap so an inference failure falls back to
+        # the feather mask instead of killing the paste worker (audit P1-16).
+        try:
+            labels, _face_mask = self.backend.parse(frame_bgr[y_s:y_e, x_s:x_e])
+        except Exception as e:
+            log.warning("face-parse backend failed (%s); feather fallback this frame", e)
+            return np.zeros((0, 0), dtype=np.float32), crop_box
         if labels.shape[:2] != (ph, pw):
-            # Backend emits labels at its own output resolution; alpha must map
-            # 1:1 onto the crop box or _paste_masked samples the wrong region.
             labels = cv2.resize(labels.astype(np.uint8), (pw, ph), interpolation=cv2.INTER_NEAREST)
         mask = np.isin(labels, _FACE_CLASSES).astype(np.float32)
         mask = _lower_band(mask)
         k = max(1, int(0.1 * ph // 2) * 2 + 1)
         mask = cv2.GaussianBlur(mask, (k, k), 0)
-        self._cache_key = key
-        self._cache_mask = mask
+        with self._cache_lock:
+            self._cache_key = key
+            self._cache_mask = mask
         return mask, crop_box
 
     def mouth_mask_cached_only(self, frame_bgr: np.ndarray, face_box):
         # Cache-hit-only lookup for the paste worker thread (never calls the
         # MLX parse backend off the main thread). None means cache miss — the
         # caller must fill the mask on the main thread.
-        if self._cache_mask is None or self._cache_key is None:
+        with self._cache_lock:
+            cached_mask = self._cache_mask
+            cached_key = self._cache_key
+        if cached_mask is None or cached_key is None:
             return None
         crop_box = _expand_crop_box(face_box, frame_bgr.shape)
         x_s, y_s, x_e, y_e = crop_box
         pw, ph = x_e - x_s, y_e - y_s
         key = (pw, ph, x_s, y_s)
         if (
-            self._cache_key[:2] == key[:2]
-            and abs(self._cache_key[2] - key[2]) <= self.MASK_CACHE_TOL
-            and abs(self._cache_key[3] - key[3]) <= self.MASK_CACHE_TOL
+            cached_key[:2] == key[:2]
+            and abs(cached_key[2] - key[2]) <= self.MASK_CACHE_TOL
+            and abs(cached_key[3] - key[3]) <= self.MASK_CACHE_TOL
         ):
-            return self._cache_mask, crop_box
+            return cached_mask, crop_box
         return None
 
 

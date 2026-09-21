@@ -1,6 +1,13 @@
+import queue
+import threading
 from collections import deque
 
 import numpy as np
+import pytest
+
+# session.py imports fusion_mlx at module level; skip (not error) on machines
+# without the base package so the suite stays green (audit 0921 P1-5).
+pytest.importorskip("fusion_mlx")
 
 from musetalk_mlx.pipeline.session import MuseTalkSession
 
@@ -15,12 +22,29 @@ class _MockPipe:
 
 def _make_session(tag="init"):
     # Build a session shell without fusion-mlx/weights (bypasses __init__).
+    # Sets the paste/emit infra reload() now touches so the unit test mirrors
+    # a real session's lifecycle state.
     s = MuseTalkSession.__new__(MuseTalkSession)
     s.pipe = _MockPipe(tag)
     s._weights_dir = "w"
     s._mlx_dir = None
     s._pending = deque()
     s._build_calls = []
+    s._paste_q = queue.Queue(maxsize=8)
+    s._paste_worker_t = None
+    s._paste_worker_alive = True
+    s._emit_lock = threading.RLock()
+    s._out_q = deque()
+    s._expected_pts = None
+    s._closed = False
+    s._bg_pool = None
+    s._bg_cache = []
+    s._bg_cache_lock = threading.Lock()
+    s._thermal = None  # reload() rebuilds a fresh ThermalController
+    s._paste_worker_restarted = False
+    s._paste_generation = 0
+    s._paste_mp = None  # close() cleanup path reachable for __del__ teardown
+    s._bg = None
     return s
 
 

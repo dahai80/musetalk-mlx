@@ -39,3 +39,23 @@ def test_pts_is_audio_inherited_not_system_clock():
     a.connect()
     a.publish_frame(np.zeros((32, 32, 3), dtype=np.uint8), 7.77)
     assert a._mock.frames[0]["pts"] == 7.77
+
+
+def test_close_drops_token_and_sets_closed():
+    # audit H1/3.1: close must mark _closed (stops reconnect watchdog) and drop
+    # the token from memory (held only for connect/reconnect).
+    a = LiveKitAdapter("wss://x", "secret-token", width=32, height=32, force_mock=True)
+    a.connect()
+    assert a.token == "secret-token"
+    a.close()
+    assert a._closed is True
+    assert a.token is None
+
+
+def test_mock_close_idempotent():
+    a = LiveKitAdapter("wss://x", "tok", width=32, height=32, force_mock=True)
+    a.connect()
+    a.close()
+    # second close must not raise
+    a.close()
+    assert a._closed is True

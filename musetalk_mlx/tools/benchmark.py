@@ -26,37 +26,47 @@ def main() -> int:
     from musetalk_mlx import MuseTalkSession
 
     wav, _ = librosa.load(a.audio, sr=16000)
+    # Audio must cover at least one window or pop_window never returns and the
+    # loop exits with frames=0 — fail loudly instead of reporting a false 0 FPS
+    # (audit fix).
+    if wav.size < config.SR * config.WINDOW_S:
+        log.error("audio too short (%.1fs < one %.0fs window)", wav.size / config.SR, config.WINDOW_S)
+        return 1
     session = MuseTalkSession(a.weights, a.video, mlx_dir=a.mlx_dir)
-    session.push_audio(wav)
+    try:
+        session.push_audio(wav)
 
-    import time
+        import time
 
-    t0 = time.monotonic()
-    frames = 0
-    while True:
-        out = session.get_output_frame()
-        if out is None:
-            break
-        frames += 1
-    elapsed = time.monotonic() - t0
-    stats = session.profiler.summary()
-    fps = frames / elapsed if elapsed else 0
-    report = {
-        "frames": frames,
-        "elapsed_s": elapsed,
-        "fps": fps,
-        "meets_30fps": fps >= 30,
-        "mem_mb": phys_footprint() // 1024**2,
-        "stages": {
-            k: {"n": v[0], "avg_ms": v[1] / v[0] * 1000, "max_ms": v[2] * 1000} for k, v in stats.items()
-        },
-        "budgets": {"fps": config.FPS, "mem_gb": config.MEM_BUDGET_GB},
-    }
-    out = Path(a.report)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(report, indent=2))
-    log.info("benchmark: %s", json.dumps(report))
-    return 0
+        t0 = time.monotonic()
+        frames = 0
+        while True:
+            out = session.get_output_frame()
+            if out is None:
+                break
+            frames += 1
+        elapsed = time.monotonic() - t0
+        stats = session.profiler.summary()
+        fps = frames / elapsed if elapsed else 0
+        report = {
+            "frames": frames,
+            "elapsed_s": elapsed,
+            "fps": fps,
+            "meets_30fps": fps >= 30,
+            "mem_mb": phys_footprint() // 1024**2,
+            "stages": {
+                k: {"n": v[0], "avg_ms": v[1] / v[0] * 1000, "max_ms": v[2] * 1000} for k, v in stats.items()
+            },
+            "budgets": {"fps": config.FPS, "mem_gb": config.MEM_BUDGET_GB},
+        }
+        out_path = Path(a.report)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(report, indent=2))
+        log.info("benchmark: %s", json.dumps(report))
+        # Exit non-zero on total failure so CI/release gates can detect it.
+        return 0 if frames > 0 else 1
+    finally:
+        session.close()
 
 
 if __name__ == "__main__":
