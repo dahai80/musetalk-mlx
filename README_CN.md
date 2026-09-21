@@ -66,7 +66,6 @@ weights/
 
 | 变量 | 默认 | 用途 |
 |---|---|---|
-| `MT_LCM_ENABLED` | `false` | Phase-4 LCM 桩（fusion-mlx 发布蒸馏 1-step 权重前无效果） |
 | `MT_GRAPH_OPT` | `true` | fusion-mlx #911 Conv+GN+SiLU 图改写 + 联合 mx.compile |
 | `MT_SMART_CONV` | `false` | fusion-mlx #919 SmartConv2d（图内测得慢 1.5x，关） |
 | `MT_FP16` | `true` | fp16 管线转换（30FPS + <=4GB 预算） |
@@ -95,7 +94,7 @@ crop。bbox 数学、卡尔曼平滑、守卫与待机逻辑由 `tests/test_land
 - [x] Phase 1（部分）：神经核心已在 fusion-mlx v0.2.0；DWPose bbox 数学 + 卡尔曼 + 待机眨眼已接入；MLX DWPose 后端待 fusion-mlx #909
 - [x] Phase 2（业务层）：重叠音频滑窗（前缀平滑）、生产级融合贴回 + 可插拔 face-parse 掩码、零拷贝帧出站（memoryview 直交 livekit VideoFrame，FR-LK-001）、离线 Demo 打磨。embedding 级前缀缓存待 fusion-mlx #914；face-parse 模型待 #910；native IOSurface→CVPixelBuffer 直编待 #913（livekit Python SDK 当前不直接接受 CVPixelBuffer；桥已接入非 LiveKit sink）。
 - [x] Phase 3（业务层）：完整温控降级阶梯（FR-END-003）、ReloadModel 热重载（FR-MLX-006）、LiveKit 实时适配器（FR-LK-001/002，音频继承 PTS，双向音频）、实时运行 CLI。图优化 + ICB 性能待 fusion-mlx #911/#912。
-- [x] Phase 4（桩）：LCMFastSession 配置桩（默认关闭；主版本用多步 DDIM）。蒸馏训练不在本仓库范围。
+- [x] Phase 4（LCM）：MLX 架构下不适用。fusion-mlx pipe 本身就是 single-step t=0，没有多步 DDIM 可蒸馏成 1-step fast path——LCM 蒸馏在此是同义反复。先前的 `LCMFastSession` 桩 + `MT_LCM_ENABLED` flag 实例化了一个渲染热路径从不调用的死对象，暗示存在不存在的 fast path；两者已删，诚实处理。若 fusion-mlx 未来发布蒸馏权重 API，应重新引入真实 fast path（非桩）。
 - [ ] 集成测试：神经核心已验证（7 个集成测试通过）；#915 修复已验证（权重严格加载 + mel 打包）；真实关键点唇形对齐被 fusion-mlx #917（DWPose 输出损坏）阻塞 — 见 `tests/integration/INTEGRATION_PENDING.md`。
 
 ## 性能（M5 Max）

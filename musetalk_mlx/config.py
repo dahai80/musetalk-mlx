@@ -85,12 +85,6 @@ LEAK_BUDGET_MB = 50.0  # over a 2h session
 BG_POOL_MAX_FRAMES = _env_int("MT_BG_POOL_MAX_FRAMES", 240)
 BG_POOL_BUDGET_MB = _env_int("MT_BG_POOL_BUDGET_MB", 1024)
 
-# Phase 4 (non-blocking): LCM single-step stub. The fusion-mlx pipe is already
-# single-step t=0; LCM_STEPS has no pipe-side effect until a distilled-weights
-# API lands upstream. Disabled by default.
-LCM_ENABLED = _env_bool("MT_LCM_ENABLED", False)
-LCM_STEPS = 1
-
 # FR-MLX-003: consume the fusion-mlx #911 graph pass (Conv+GN+SiLU fusion,
 # mx.compile). Auto-degrades to plain ops when fusion-mlx lacks it.
 GRAPH_OPT = _env_bool("MT_GRAPH_OPT", True)

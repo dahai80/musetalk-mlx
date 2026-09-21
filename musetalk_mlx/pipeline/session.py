@@ -14,7 +14,6 @@ from ..face.crop import FaceCropper
 from ..face.landmarks import LandmarkTracker
 from ..face.mask import load_face_parse
 from ..pipeline.blending import paste_back
-from ..pipeline.lcm import LCMFastSession
 from ..pipeline.paste_proc import PasteProcess
 from ..utils.audio import AudioWindower
 from ..utils.profiling import StageProfiler
@@ -67,13 +66,13 @@ class MuseTalkSession:
             # single-frame UNet call inside the 33ms budget on M-series GPU.
             self.pipe.astype(mx.float16)
             log.info("pipeline cast to fp16")
-        # LCM Phase-4 stub: the fusion-mlx pipe is single-step t=0 with no
-        # distilled-weights API; LCMFastSession generates nothing distinct.
-        # Instantiate only when explicitly enabled so the disabled default does
-        # not allocate a dead object that misleads readers into thinking a
-        # fast path exists (audit E2). When enabled, LCMFastSession validates
-        # the pipe and raises on misuse.
-        self.lcm = LCMFastSession(self.pipe) if config.LCM_ENABLED else None
+        # Phase 4 (LCM distillation) is N/A in the MLX architecture: the
+        # fusion-mlx pipe is inherently single-step t=0, so there is no
+        # multi-step DDIM loop to distill into a 1-step fast path. The prior
+        # LCMFastSession stub + MT_LCM_ENABLED flag were removed — they
+        # instantiated a dead object never called from the render hot path,
+        # implying a fast path that does not exist. If fusion-mlx ships a
+        # distilled-weights API, reintroduce a real fast path, not a stub.
         self._bg_store = BackgroundStore(bg_video_path)
         self._windower = AudioWindower(sr=self.sr, fps=self.fps)
         # Stateful thermal controller (hysteresis, one-tier-at-a-time downgrade)
@@ -318,12 +317,11 @@ class MuseTalkSession:
                 rl.release()
             return False
         # Peak-memory guard (audit 0921 P1-1): swap FIRST, overwrite every
-        # other strong ref to the old pipe (lcm), then drop it + flush the MLX
+        # other strong ref to the old pipe, then drop it + flush the MLX
         # allocator cache BEFORE _precompute_cache — otherwise old-pipe weights
         # (~1-2GB) stay alive alongside the new pipe while precompute encodes
         # every bg frame, breaking the 4GB budget.
         old, self.pipe = self.pipe, new_pipe
-        self.lcm = LCMFastSession(new_pipe) if config.LCM_ENABLED else None
         # Drop compiled closures BEFORE clearing the old pipe ref: a compiled
         # graph captures the old pipe in its closure, so without this the old
         # 1-2GB weights stayed alive alongside the new pipe (A4 finding:

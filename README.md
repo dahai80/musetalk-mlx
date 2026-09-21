@@ -69,7 +69,6 @@ Deploy-time overrides (no repackaging needed). All are `MT_*` env vars read at i
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `MT_LCM_ENABLED` | `false` | Phase-4 LCM stub (no effect until fusion-mlx ships distilled 1-step weights) |
 | `MT_GRAPH_OPT` | `true` | fusion-mlx #911 Conv+GN+SiLU graph-pass + joint mx.compile |
 | `MT_SMART_CONV` | `false` | fusion-mlx #919 SmartConv2d (measured 1.5x slower in-graph; off) |
 | `MT_FP16` | `true` | fp16 pipeline cast (30FPS + <=4GB budget) |
@@ -100,7 +99,7 @@ by `tests/test_landmarks.py` independent of the model.
 - [x] Phase 1 (partial): neural core in fusion-mlx v0.2.0; DWPose bbox math + Kalman + idle-blink wired; MLX DWPose backend pending fusion-mlx #909
 - [x] Phase 2 (business layer): overlapping audio windower (prefix-smoothing), production blend paste-back + pluggable face-parse mask, zero-copy frame egress (memoryview handoff to livekit VideoFrame, FR-LK-001), offline demo polish. Embedding-level prefix cache pending fusion-mlx #914; face-parse model pending #910; native IOSurface→CVPixelBuffer direct-encoding pending #913 (livekit Python SDK does not accept CVPixelBuffer today; bridge wired for non-LiveKit sinks).
 - [x] Phase 3 (business layer): full thermal degradation ladder (FR-END-003), ReloadModel hot-reload (FR-MLX-006), LiveKit realtime adapter (FR-LK-001/002, audio-inherited PTS, bidirectional audio), realtime runner CLI. Graph pass + ICB perf pending fusion-mlx #911/#912.
-- [x] Phase 4 (stub): LCMFastSession config stub (disabled; main release uses multi-step DDIM). Distillation training out of scope.
+- [x] Phase 4 (LCM): N/A in the MLX architecture. The fusion-mlx pipe is inherently single-step t=0, so there is no multi-step DDIM loop to distill into a 1-step fast path — LCM distillation is a no-op here. The prior `LCMFastSession` stub + `MT_LCM_ENABLED` flag instantiated a dead object never called from the render hot path, implying a fast path that does not exist; both removed for honesty. If fusion-mlx ships a distilled-weights API, reintroduce a real fast path (not a stub).
 - [ ] Integration testing: neural core verified (7 integration tests green); #915 fix verified (strict weight load + mel packaging); real-landmark lip-sync parity blocked by fusion-mlx #917 (DWPose output corruption) — see `tests/integration/INTEGRATION_PENDING.md`.
 
 ## Performance (M5 Max)
