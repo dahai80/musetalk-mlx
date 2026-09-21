@@ -35,7 +35,7 @@ pip install -e ~/fusion/fusion-mlx
 pip install -e ".[dev]"
 ```
 
-`fusion-mlx[video]>=0.2.0` 为版本化依赖（无硬编码本地路径）；先 editable 安装 fusion-mlx 检出目录以满足版本约束。
+`fusion-mlx[video]>=0.10.2,<0.11` 为版本化依赖（无硬编码本地路径）；先 editable 安装 fusion-mlx 检出目录以满足版本约束。
 
 ### 权重
 
@@ -74,7 +74,7 @@ weights/
 | `MT_BATCH` | `2` | 批量 UNet+decode 深度（2 在 RTT 预算内） |
 | `MT_DECODE_128` | `false` | 解码前 2x2 均值池化 latent（速度优先） |
 | `MT_PASTE_MULTIPROC` | `false` | 子进程做 paste 融合（关——无测得收益，增 IPC） |
-| `MT_BG_POOL_MAX_FRAMES` | `900` | 底片帧池上限（30s@30fps）；超长底片按需读取 |
+| `MT_BG_POOL_MAX_FRAMES` | `240` | 底片帧池上限（8s@30fps，约 304MB）；超长底片按需读取 |
 
 ## DWPose / 人脸关键点
 
@@ -111,7 +111,7 @@ crop。bbox 数学、卡尔曼平滑、守卫与待机逻辑由 `tests/test_land
 | **allocator 上限在预热后设置**（load/precompute 完成后 cache 4GB + budget 8GB） | load 之前设置上限会永久污染 allocator 水位：全程 84–92ms vs 62–67ms/round。cache 扫描 2.5/3/3.5/4/5/6GB → 61.8/58.9/59.1/57.0/56.9/58.4ms |
 | 深度 2 渲染前瞻 | 排队两个 lazy round，GPU 在 paste/emit CPU 工作期间保持忙碌（单流；sync 是流级粒度）。注意：MLX lazy eval 当前会串行化 —— 提交的 round 的图只在 sync 时才物化，故深度 2 队列尚未让 GPU 计算与 paste 重叠。重叠需 eager dispatch（fusion-mlx issue 待提） |
 | paste 工作线程 + `cv2.blendLinear` | warp/blend/emit（纯 cv2/numpy）移出渲染线程；blend 比numpy fp32 快 7 倍；parse-mask cache miss 延迟到主线程 |
-| **子进程 paste worker**（`config.PASTE_MULTIPROC`，默认开） | paste/blend 跑在子进程（独立 GIL），不受 MLX busy-wait sync 在渲染线程上的 GIL 饿死影响。stdin/stdout 上 4 字节长度帧 + pickle 协议；IPC 只传 expand 后的 crop，不传整帧。IPC 失败回退线程内 paste |
+| **子进程 paste worker**（`config.PASTE_MULTIPROC`，默认关） | paste/blend 跑在子进程（独立 GIL），不受 MLX busy-wait sync 在渲染线程上的 GIL 饿死影响。stdin/stdout 上 4 字节长度帧 + pickle 协议；IPC 只传 expand 后的 crop，不传整帧。默认关：热路径已在渲染线程内联 paste（缓存 alpha ~0.2ms，无 IPC）；worker 保留为 drain/IPC 失败回退 |
 | **`DECODE_128` 速度开关**（`config.DECODE_128`，默认关） | UNet 输出 latent 2x2 均值池化（32²→16²）后再 VAE decode → 128² face patch，decode FLOPs ~1/4。速度优先、可牺牲质量场景；默认关闭，按 flag 开启 |
 | 批 2 热路径（`config.BATCH`） | 每 2 步一次 UNet+decode，RTT 安全（多等一个 33ms 步） |
 

@@ -107,7 +107,9 @@ class MuseTalkSession:
         # main thread fall back to inline paste when full.
         self._paste_q = queue.Queue(maxsize=max(config.BATCH * 4, 8))
         self._emit_lock = threading.RLock()
-        self._out_q_cap = config.RENDER_HIGH_WATER  # producer backpressure (RENDER_HIGH_WATER) is primary; drop-oldest here is the last resort (audit P2-3)
+        # Producer backpressure (RENDER_HIGH_WATER) is primary; drop-oldest
+        # here is the last resort (audit P2-3).
+        self._out_q_cap = config.RENDER_HIGH_WATER
         self._closed = False
         # atexit safety net: if the caller forgets close()/`with`, still tear
         # down the paste subprocess + worker thread at interpreter exit. __del__
@@ -514,12 +516,7 @@ class MuseTalkSession:
         # in-flight round, and the paste worker has nothing queued. The paste
         # worker may still be pasting the last items — the _wait_out_q grace in
         # get_output_frame covers that residual window.
-        return (
-            not self._pending
-            and not self._inflight
-            and not self._out_q
-            and self._paste_q.empty()
-        )
+        return not self._pending and not self._inflight and not self._out_q and self._paste_q.empty()
 
     def end_of_stream(self) -> None:
         # Offline boundary: zero-pad the sub-window audio tail so the final

@@ -37,7 +37,7 @@ pip install -e ~/fusion/fusion-mlx
 pip install -e ".[dev]"
 ```
 
-`fusion-mlx[video]>=0.2.0` is a versioned dependency (no hardcoded local path);
+`fusion-mlx[video]>=0.10.2,<0.11` is a versioned dependency (no hardcoded local path);
 install the fusion-mlx checkout editable first so the version constraint is satisfied.
 
 ### Weights
@@ -77,7 +77,7 @@ Deploy-time overrides (no repackaging needed). All are `MT_*` env vars read at i
 | `MT_BATCH` | `2` | batched UNet+decode depth (RTT-safe at 2) |
 | `MT_DECODE_128` | `false` | 2x2 avg-pool latent before decode (speed over quality) |
 | `MT_PASTE_MULTIPROC` | `false` | paste blend in a child process (off — no measured win, adds IPC) |
-| `MT_BG_POOL_MAX_FRAMES` | `900` | bg frame pool cap (30s@30fps); longer bg served on-demand |
+| `MT_BG_POOL_MAX_FRAMES` | `240` | bg frame pool cap (8s@30fps, ~304MB); longer bg served on-demand from the reader |
 
 ## DWPose / face landmarks
 
@@ -116,8 +116,8 @@ background GPU load inflates numbers several-fold (see
 | **MLX 0.32.0 pin** | 0.32.2 ships a decode kernel regression on the compiled joint graph: 73.6 vs 61.6ms/round measured. `mlx==0.32.0` + `mlx-metal==0.32.0` required for the numbers below |
 | **Allocator limits POST-warmup** (cache 4GB + budget 8GB after load/precompute) | limits set before load poison the allocator watermark: 84–92ms vs 62–67ms per round, all process long. Cache sweep at 2.5/3/3.5/4/5/6GB: 61.8/58.9/59.1/57.0/56.9/58.4ms |
 | Depth-2 render-ahead | two lazy rounds queued so the GPU stays busy across paste/emit CPU work (single stream; sync is stream-wide). Caveat: MLX lazy eval currently serializes — a submitted round's graph only materializes on sync, so the depth-2 queue does not yet overlap GPU compute with paste. Overlap needs eager dispatch (fusion-mlx issue pending) |
-| Paste worker thread + `cv2.blendLinear` | warp/blend/emit (pure cv2/numpy) off the render thread; blend 7x faster than numpy fp32 math; parse-mask cache misses deferred to the main thread |
-| **Subprocess paste worker** (`config.PASTE_MULTIPROC`, default ON) | paste/blend runs in a child process (own GIL), immune to the GIL starvation from MLX's busy-wait sync on the render thread. 4-byte length-framed pickle protocol over stdin/stdout; IPC ships the expanded crop only, not the full frame. Thread-only fallback on IPC failure |
+| Paste worker thread + `cv2.blendLinear` | the hot path pastes inline on the dedicated render thread (cached alpha ~0.2ms); `cv2.blendLinear` blend is 7x faster than numpy fp32 math. The worker thread path is retained for fallback/drain |
+| **Subprocess paste worker** (`config.PASTE_MULTIPROC`, default OFF) | paste/blend runs in a child process (own GIL), immune to the GIL starvation from MLX's busy-wait sync on the render thread. 4-byte length-framed pickle protocol over stdin/stdout; IPC ships the expanded crop only, not the full frame. Default OFF: the hot path now pastes inline on the render thread (cached alpha ~0.2ms, no IPC); the worker is retained as a fallback for drain/IPC-failure paths |
 | **`DECODE_128` speed switch** (`config.DECODE_128`, default OFF) | 2x2 average-pool the UNet output latent (32²→16²) before VAE decode → 128² face patch at ~1/4 decode FLOPs. Speed-over-quality for scenarios that tolerate it; ships disabled, opt-in by flag |
 | Batch-2 hot path (`config.BATCH`) | one UNet+decode per 2 steps, RTT-safe (adds one 33ms step) |
 

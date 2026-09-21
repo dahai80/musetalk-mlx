@@ -46,6 +46,15 @@ dev = [
     "ruff>=0.5",
     "scikit-image>=0.22",
 ]
+eval = [
+    # Offline quality evaluation (LSE-C/LSE-D/CSIM). Runs in a torch env,
+    # NOT the torch-free realtime path — documented as a separate extra so a
+    # torch-free terminal install does not pull torch/insightface (audit P2).
+    "torch>=2.0",
+    "insightface>=0.7",
+    "scikit-image>=0.22",
+    "librosa>=0.10",
+]
 
 [project.scripts]
 musetalk-mlx-offline = "musetalk_mlx.tools.offline_infer:main"

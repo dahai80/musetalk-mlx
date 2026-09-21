@@ -55,7 +55,6 @@ def main() -> int:
     # triggers (the while-loop guard checks reloads[-1]["t"], empty list = never).
     if a.with_reload:
         reloads.append({"t": 0.0, "ok": True, "resume_gap_s": 0.0})
-    last_frame_t = time.monotonic()
     # Backpressure: re-push only when the windower buffer is actually draining
     # (not on every transient window boundary), and rate-limit to wall-clock
     # cadence so consumed does not run ahead of real time and corrupt PTS
@@ -66,7 +65,6 @@ def main() -> int:
         out = session.get_output_frame()
         if out is not None:
             frames += 1
-            last_frame_t = time.monotonic()
         now = time.monotonic()
         if now - last_push >= 1.0:
             session.push_audio(chunk)
@@ -80,7 +78,6 @@ def main() -> int:
                 o = session.get_output_frame()
                 if o is not None:
                     frames += 1
-                    last_frame_t = time.monotonic()
                     break
                 if time.monotonic() - rt0 > 10.0:
                     break
