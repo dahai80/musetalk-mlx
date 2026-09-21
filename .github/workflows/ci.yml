@@ -31,3 +31,32 @@ jobs:
 
       - name: Tests
         run: pytest tests/ -q
+
+      # Gate LOGIC exercised on synthetic reports. The real perf/leak gates
+      # need real weights + clean GPU (not available on CI runners); they are
+      # a local RELEASE_CHECKLIST step. This job only verifies the gate scripts
+      # parse + threshold correctly (audit P1-2: connect gates).
+      - name: Gate logic (synthetic reports)
+        run: |
+          mkdir -p /tmp/gates
+          # Synthetic PASS reports.
+          printf '{"fps":30.5,"interval_p95_ms":33.0}' > /tmp/gates/pacing_pass.json
+          printf '{"stable_rtt":{"p95_ms":55.0,"scope":"steady-state"}}' > /tmp/gates/rtt_pass.json
+          printf '{"leak_mb":10,"pass":true,"leak_budget_mb":50}' > /tmp/gates/leak_pass.json
+          # Synthetic FAIL reports.
+          printf '{"fps":27.0,"interval_p95_ms":37.0}' > /tmp/gates/pacing_fail.json
+          printf '{"stable_rtt":{"p95_ms":120.0,"scope":"steady-state"}}' > /tmp/gates/rtt_fail.json
+          printf '{"leak_mb":80,"pass":false,"leak_budget_mb":50}' > /tmp/gates/leak_fail.json
+          # PASS cases must exit 0.
+          python scripts/perf_gate.py /tmp/gates/pacing_pass.json /tmp/gates/rtt_pass.json
+          python scripts/leak_gate.py /tmp/gates/leak_pass.json
+          # FAIL cases must exit non-zero.
+          if python scripts/perf_gate.py /tmp/gates/pacing_fail.json; then
+            echo "perf_gate should have failed"; exit 1
+          fi
+          if python scripts/perf_gate.py /tmp/gates/pacing_pass.json /tmp/gates/rtt_fail.json; then
+            echo "rtt gate should have failed"; exit 1
+          fi
+          if python scripts/leak_gate.py /tmp/gates/leak_fail.json; then
+            echo "leak_gate should have failed"; exit 1
+          fi
