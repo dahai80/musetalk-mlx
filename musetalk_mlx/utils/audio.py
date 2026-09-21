@@ -97,6 +97,15 @@ class AudioWindower:
                 self.consumed += dropped
                 log.warning("audio buffer overflow %d samples, dropped oldest (thermal stall?)", dropped)
 
+    def has_window(self) -> bool:
+        # True when pop_window would return a window right now. The consumer
+        # wait in get_output_frame uses this to distinguish "producer still has
+        # work" from "pipeline idle" (render thread may not have run
+        # _encode_windows yet — pending/inflight alone race the producer).
+        with self._lock:
+            need = self.window if self._tail.size == 0 else self.hop
+            return self._pending >= need
+
     def pop_window(self):
         """Return (window, pts_start) once a full window is buffered, else (None, None).
 

@@ -114,6 +114,15 @@ PRECOMPUTE = _env_bool("MT_PRECOMPUTE", True)
 # (BATCH=2 adds one 33ms step; audio-to-video RTT stays <=80ms).
 BATCH = _env_int("MT_BATCH", 2)
 
+# Dedicated render thread (A3 LiveKit E2E finding 2026-09-21): a 33ms-paced
+# consumer calling get_output_frame structurally caps throughput at ~2 frames
+# per (round+period) because one b2 round is ~57ms — measured 17.4 fps publish
+# side even though render capacity is 35 fps. The render thread produces into
+# _out_q asynchronously; the pacer only pops+publishes. HIGH_WATER bounds the
+# queue: producer pauses when the consumer falls behind (60s audio pushed
+# faster than realtime would otherwise buffer unboundedly).
+RENDER_HIGH_WATER = _env_int("MT_RENDER_HIGH_WATER", 12)
+
 # Speed-over-quality decode switch (2026-09-20 decision): 2x2 average-pool the
 # UNet output latent before the VAE decoder, so the decoder runs at 128^2
 # output instead of 256^2 (decoder FLOPs scale with spatial^2: decode

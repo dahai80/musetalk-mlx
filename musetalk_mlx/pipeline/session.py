@@ -1,6 +1,7 @@
 import logging
 import queue
 import threading
+import time
 from collections import deque
 
 import mlx.core as mx
@@ -106,7 +107,7 @@ class MuseTalkSession:
         # main thread fall back to inline paste when full.
         self._paste_q = queue.Queue(maxsize=max(config.BATCH * 4, 8))
         self._emit_lock = threading.RLock()
-        self._out_q_cap = config.BATCH * 4  # drop oldest past this (no backpressure sink, audit P2-3)
+        self._out_q_cap = config.RENDER_HIGH_WATER  # producer backpressure (RENDER_HIGH_WATER) is primary; drop-oldest here is the last resort (audit P2-3)
         self._closed = False
         # atexit safety net: if the caller forgets close()/`with`, still tear
         # down the paste subprocess + worker thread at interpreter exit. __del__
@@ -142,6 +143,14 @@ class MuseTalkSession:
             except Exception as e:
                 log.warning("paste proc unavailable (%s); thread-only paste", e)
                 self._paste_mp = None
+        # Dedicated render thread (see config.RENDER_HIGH_WATER): decouples the
+        # ~57ms b2 round from the 33ms publish pacing. Without it the pacer
+        # consumer drives rendering one round per tick and caps publish FPS at
+        # ~2/(round+period) — measured 17.4 fps vs 35 fps render capacity.
+        self._render_lock = threading.Lock()  # held across next_step; interrupt()/reload() take it too
+        self._render_ev = threading.Event()  # wake: new audio windows pending
+        self._render_t = threading.Thread(target=self._render_loop, name="musetalk-render", daemon=True)
+        self._render_t.start()
         log.info(
             "MuseTalkSession ready: bg=%s frames=%d step=%d (%.1fms)",
             bg_video_path,
@@ -250,6 +259,11 @@ class MuseTalkSession:
         wd = weights_dir or self._weights_dir
         md = mlx_dir if mlx_dir is not None else self._mlx_dir
         log.info("ReloadModel: draining %d pending chunks, rebuilding pipe", len(self._pending))
+        # Serialize against the render thread (producer) so no round is
+        # mid-flight against the old pipe while the swap happens.
+        rl = getattr(self, "_render_lock", None)
+        if rl is not None:
+            rl.acquire()
         self._pending.clear()
         self._inflight = deque()  # stale graph output belongs to the old pipe
         # Drain in-flight paste + emitted frames so old-model frames do not
@@ -268,6 +282,8 @@ class MuseTalkSession:
             new_pipe = self._build_pipe(wd, md)
         except Exception as e:
             log.error("ReloadModel failed (%s); keeping old pipe, no black screen", e)
+            if rl is not None:
+                rl.release()
             return False
         # Peak-memory guard (audit 0921 P1-1): swap FIRST, overwrite every
         # other strong ref to the old pipe (lcm), then drop it + flush the MLX
@@ -303,6 +319,8 @@ class MuseTalkSession:
         self._weights_dir = wd
         self._mlx_dir = md
         log.info("ReloadModel done")
+        if rl is not None:
+            rl.release()
         return True
 
     def push_audio(self, pcm: np.ndarray) -> None:
@@ -312,6 +330,50 @@ class MuseTalkSession:
         if arr.dtype != np.float32:
             log.warning("push_audio got %s, casting to float32", arr.dtype)
         self._windower.push(pcm)
+        self._render_ev_set()
+
+    def _render_loop(self) -> None:
+        # Dedicated producer thread: pumps RenderScheduler.next_step while
+        # audio windows are pending, up to RENDER_HIGH_WATER out_q frames.
+        # get_output_frame becomes a pure consumer (pop out_q, no rendering).
+        # The render lock is held across next_step so interrupt()/reload()
+        # serialize against mid-round teardown; it is uncontended in steady
+        # state (one producer, uncontended Lock ~ns).
+        log.info("render thread started")
+        while not self._closed:
+            self._encode_windows()
+            if not self._pending and not self._inflight:
+                if self._out_q:
+                    # Consumer still draining; producer idles WITHOUT clearing
+                    # the event first (a push between check and clear must not
+                    # be lost — standard clear-after-check wake pattern).
+                    time.sleep(0.01)
+                    continue
+                self._render_ev.clear()
+                if self._pending or self._inflight or self._out_q:
+                    continue
+                self._render_ev.wait(timeout=0.5)
+                continue
+            if len(self._out_q) >= config.RENDER_HIGH_WATER:
+                # Backpressure: consumer behind, producer pauses. The queue
+                # drains at 30fps while the producer pauses; catching up
+                # unbounded would grow RTT (buffered frames = latency).
+                time.sleep(0.005)
+                self._render_ev.clear()
+                self._render_ev.wait(0.05)
+                continue
+            try:
+                with self._render_lock:
+                    ladder = self._thermal.ladder()
+                    # pop=False: frames stay in out_q for the consumer.
+                    self._scheduler.next_step(ladder, pop=False)
+                self._render_ev.set()  # re-check pending: more windows may have arrived
+            except Exception:
+                # A render failure must not kill the producer thread (Rule 12):
+                # log loudly and idle briefly; next push re-seeds the pipeline.
+                log.exception("render thread render-loop iteration failed")
+                self._render_ev.clear()
+                self._render_ev.wait(0.2)
 
     def _drain_paste_queue(self) -> None:
         # Flush + restart the paste worker against an empty queue so stale
@@ -348,6 +410,14 @@ class MuseTalkSession:
         if self._closed:
             return
         self._closed = True
+        # Stop the render producer BEFORE the paste worker: it must not submit
+        # new rounds (or paste items) while teardown drains the queues.
+        rt = getattr(self, "_render_t", None)
+        if rt is not None and rt.is_alive():
+            self._render_ev.set()  # wake out of the idle wait to see _closed
+            rt.join(timeout=2.0)
+            if rt.is_alive():
+                log.warning("render thread did not stop within 2s; leaving daemon")
         try:
             import atexit
 
@@ -401,11 +471,32 @@ class MuseTalkSession:
         except Exception:
             log.warning("MuseTalkSession finalized without clean close() — paste proc may leak")
 
+    @property
+    def idle(self) -> bool:
+        # True when the pipeline holds no recoverable work. Consumer-side
+        # (benchmark drain / host apps): out_q empty, nothing pending, no
+        # in-flight round, and the paste worker has nothing queued. The paste
+        # worker may still be pasting the last items — the _wait_out_q grace in
+        # get_output_frame covers that residual window.
+        return (
+            not self._pending
+            and not self._inflight
+            and not self._out_q
+            and self._paste_q.empty()
+        )
+
     def end_of_stream(self) -> None:
         # Offline boundary: zero-pad the sub-window audio tail so the final
         # <5s renders instead of being silently dropped. No-op mid-stream.
         if self._windower.flush():
             self._encode_windows()
+        self._render_ev_set()
+
+    def _render_ev_set(self):
+        # Wake helper: shells may lack the event (render-thread sessions only).
+        ev = getattr(self, "_render_ev", None)
+        if ev is not None:
+            ev.set()
 
     def interrupt(self) -> int:
         # Barge-in (audit 0921 P3 — K12 conversation core requirement): drop
@@ -416,12 +507,26 @@ class MuseTalkSession:
         if self._closed:
             return 0
         dropped = len(self._pending)
-        self._pending.clear()
-        # In-flight rounds hold LAZY mx graphs (submitted but not eval'd).
-        # Dropping the ref cancels the never-started GPU work silently — no
-        # sync needed, nothing was materialized yet.
-        inflight = len(self._inflight)
-        self._inflight.clear()
+        # Serialize against the render thread mid-round: it may hold items it
+        # popped from _pending inside next_step; without the lock a round could
+        # re-emit frames AFTER the interrupt (stale utterance frames).
+        # Serialize against the render thread mid-round: it may hold items it
+        # popped from _pending inside next_step; without the lock a round could
+        # re-emit frames AFTER the interrupt (stale utterance frames). Shells
+        # built via __new__ have no render thread/lock — clear without locking.
+        rl = getattr(self, "_render_lock", None)
+        if rl is None:
+            self._pending.clear()
+            # In-flight rounds hold LAZY mx graphs (submitted but not eval'd).
+            # Dropping the ref cancels the never-started GPU work silently — no
+            # sync needed, nothing was materialized yet.
+            inflight = len(self._inflight)
+            self._inflight.clear()
+        else:
+            with rl:
+                self._pending.clear()
+                inflight = len(self._inflight)
+                self._inflight.clear()
         with self._emit_lock:
             self._out_q.clear()
             self._expected_pts = None  # next emitted frame re-seeds the observer
@@ -451,23 +556,52 @@ class MuseTalkSession:
 
     def get_output_frame(self):
         # Render the next 33ms step. Returns (frame_bgr, pts) or None.
-        self._encode_windows()
+        # Consumer-only once the render thread runs (see _render_loop): pops
+        # out_q; never renders inline. Shells built via __new__ (unit tests)
+        # and threadless sessions keep the inline path so their private
+        # attributes and call patterns keep working unchanged.
         if self._out_q:
             return self._out_q.popleft()
-        if not self._pending and not self._inflight:
-            # Nothing left to render; the paste worker may still be finishing
-            # an in-flight round, so briefly wait before declaring idle.
-            out = self._wait_out_q()
-            if out is not None:
-                return out
-            return None
-        # Single thermal read per frame: the stateless thermal_tier() reads OS
-        # state each call, and two reads in one frame (get_output_frame + _render)
-        # can straddle a state flip — batched dispatch commits to normal while
-        # _render then applies critical, jumping tiers (audit A4). The controller
-        # also applies hysteresis so fair<->serious chatter does not flap steps.
-        ladder = self._thermal.ladder()
-        return self._scheduler.next_step(ladder)
+        if getattr(self, "_render_t", None) is None:
+            # Threadless session/shell: render inline (pre-thread behavior).
+            self._encode_windows()
+            if not self._pending and not self._inflight:
+                # Nothing left to render; the paste worker may still be finishing
+                # an in-flight round, so briefly wait before declaring idle.
+                out = self._wait_out_q()
+                if out is not None:
+                    return out
+                return None
+            # Single thermal read per frame: the stateless thermal_tier() reads OS
+            # state each call, and two reads in one frame (get_output_frame + _render)
+            # can straddle a state flip — batched dispatch commits to normal while
+            # _render then applies critical, jumping tiers (audit A4). The controller
+            # also applies hysteresis so fair<->serious chatter does not flap steps.
+            ladder = self._thermal.ladder()
+            return self._scheduler.next_step(ladder)
+        # Wait while the producer is actively working (bounded): a single call
+        # still returns a frame when work is pending (host apps + tests), but
+        # with a backlog out_q pops are instant — the 33ms pacer is no longer
+        # the one driving the 57ms render rounds (A3 finding 2026-09-21).
+        deadline = time.monotonic() + 2.0
+        while not self._out_q:
+            if not self._pending and not self._inflight and not self._windower.has_window():
+                # Producer idle (audio gap / ended): nothing will arrive.
+                break
+            if time.monotonic() >= deadline:
+                rt = getattr(self, "_render_t", None)
+                log.warning(
+                    "get_output_frame: producer busy but no frame in 2s "
+                    "(pending=%d inflight=%d out_q=%d window=%s thread_alive=%s)",
+                    len(self._pending),
+                    len(self._inflight),
+                    len(self._out_q),
+                    self._windower.has_window(),
+                    rt is not None and rt.is_alive(),
+                )
+                break
+            time.sleep(0.002)
+        return self._out_q.popleft() if self._out_q else None
 
     def _emit(self, frame, pts) -> None:
         # Single egress point: PTS sync-deviation observability (FR-LK-001).
@@ -584,22 +718,20 @@ class MuseTalkSession:
         self._paste_worker_alive = True
 
     def _paste_item(self, frame, face, bbox, pts) -> None:
-        # Main-thread entry: fetch alpha (fills the parse cache on miss) and
-        # hand the item to the worker. If the worker has died (audit P0-3
-        # liveness), paste inline so output never stalls. A dead worker also
-        # gets ONE main-thread restart attempt (audit 0921 P0-2) so a transient
-        # MemoryError does not permanently halve fps (prior R1 intent), while
-        # the budget keeps a death-loop bounded.
+        # Inline paste on the render thread (A3 finding 2026-09-21): paste_back
+        # with a cached alpha is ~0.2-0.5ms, so routing through the paste
+        # worker (thread paste under GIL contention, or the mp 12MB pickle IPC
+        # round trip) was pure overhead — next_step p95 hit 305ms waiting for
+        # the worker to emit while the render thread sat idle. The full
+        # mouth_mask (parse on miss) runs here on the render thread, which is
+        # also the MLX thread — single-threaded parse, no contract break.
+        # Worker/mp machinery stays for interrupt/drain paths (tests) but the
+        # hot path never queues.
         alpha, _ = self._mask.mouth_mask(frame, bbox)
-        if not self._paste_worker_alive and not self._closed:
-            self._maybe_restart_paste_worker()
-        if not self._paste_worker_alive or self._closed:
-            out = paste_back(frame, face, bbox, alpha=alpha if alpha.size else None, mask_provider=self._mask)
-            with self._emit_lock:
-                self._last_frame = out
-                self._emit(out, pts)
-            return
-        self._submit_paste(frame, face, bbox, alpha if alpha.size else None, pts)
+        out = paste_back(frame, face, bbox, alpha=alpha if alpha.size else None)
+        with self._emit_lock:
+            self._last_frame = out
+            self._emit(out, pts)
 
     def _encode_windows(self) -> None:
         # Drain every fully-buffered overlapping 5s window into per-step chunks.

@@ -42,9 +42,14 @@ def main() -> int:
         frames = 0
         while True:
             out = session.get_output_frame()
-            if out is None:
+            if out is not None:
+                frames += 1
+                continue
+            # The render thread produces asynchronously; a None with the
+            # pipeline still busy is a producer hiccup, not end-of-stream.
+            if session.idle:
                 break
-            frames += 1
+            time.sleep(0.002)
         elapsed = time.monotonic() - t0
         stats = session.profiler.summary()
         fps = frames / elapsed if elapsed else 0

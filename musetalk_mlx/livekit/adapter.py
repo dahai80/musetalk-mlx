@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import threading
 import time
 from collections import deque
 
@@ -51,6 +52,8 @@ class LiveKitAdapter:
         self._on_interrupt = None  # barge-in hook (audit 0921 P3)
         self._connect_task = None
         self._audio_tasks = []  # inbound AudioStream drains — keep refs to avoid GC
+        self._pub_q = None  # deque of (frame_bgr, pts) for the async publish thread
+        self._pub_t = None
         self._ready = asyncio.Event() if force_mock else None
         self._closed = False
         self._reconnect_task = None  # background watchdog (audit H1)
@@ -117,7 +120,27 @@ class LiveKitAdapter:
         # 1.1.x). Format is specified per-frame on VideoFrame (audit fix).
         self._source = self._rtc.VideoSource(self.width, self.height)
         self._track = self._rtc.LocalVideoTrack.create_video_track("musetalk", self._source)
-        await self._room.local_participant.publish_track(self._track)
+        # H264 + VideoToolbox hardware encoder (macOS). The SDK default VP8
+        # software encoder caps ~5fps at 1080p — capture_frame backpressures
+        # the whole pipeline (A3 finding: publish p50 76-96ms, receiver 4.7fps).
+        # H264 hands encoding to the MediaCodec/VideoToolbox path and lifts the
+        # encoder out of the render critical path.
+        opts = self._rtc.TrackPublishOptions()
+        opts.video_codec = self._rtc.VideoCodec.H264
+        opts.video_encoding.max_bitrate = 4_000_000
+        opts.video_encoding.max_framerate = float(self.fps)
+        await self._room.local_participant.publish_track(self._track, options=opts)
+        # Async publish thread: the BGRA copy (bgra.tobytes, ~4-8MB) and
+        # capture_frame hold the GIL and starve the render thread's MLX numpy
+        # readback (A3 finding: render_eval 55ms nolk -> 140ms livekit, 2.5x).
+        # Offloading to a dedicated thread lets the render thread acquire the
+        # GIL during its readback window while publish holds it during MLX's
+        # native (GIL-free) eval — the two GIL windows no longer collide.
+        import collections as _c
+
+        self._pub_q = _c.deque()
+        self._pub_t = threading.Thread(target=self._publish_loop, name="lk-publish", daemon=True)
+        self._pub_t.start()
         self._subscribe_inbound_audio()
 
     def _start_reconnect_watchdog(self) -> None:
@@ -251,7 +274,11 @@ class LiveKitAdapter:
 
     def publish_frame(self, frame_bgr: np.ndarray, pts: float) -> None:
         # FR-LK-001: stamp RTCVideoFrame with the inherited audio PTS, never the
-        # system clock. BGR -> BGRA uint8 for the rtc frame.
+        # system clock. BGR -> BGRA uint8 for the rtc frame. Enqueue to the
+        # async publish thread (BGRA copy + capture_frame hold the GIL — doing
+        # them inline on the pacer thread starves the render thread's MLX
+        # readback, A3 finding). Bounded: drop oldest when the encoder falls
+        # behind (realtime tolerates drops, not backlog).
         if frame_bgr.ndim != 3 or frame_bgr.shape[2] != 3:
             raise ValueError(f"publish_frame expects BGR HxWx3, got shape {frame_bgr.shape}")
         h, w = frame_bgr.shape[:2]
@@ -260,6 +287,15 @@ class LiveKitAdapter:
 
             frame_bgr = cv2.resize(frame_bgr, (self.width, self.height), interpolation=cv2.INTER_LINEAR)
             h, w = self.height, self.width
+        if self._pub_q is not None:
+            self._pub_q.append((frame_bgr, pts, w, h))
+            if len(self._pub_q) > 4:
+                self._pub_q.popleft()
+                log.debug("publish queue full; dropped oldest (encoder behind)")
+            return
+        self._publish_one(frame_bgr, pts, w, h)
+
+    def _publish_one(self, frame_bgr: np.ndarray, pts: float, w: int, h: int) -> None:
         # Build BGRA in ONE contiguous buffer: write the alpha channel into a
         # pre-allocated uint8 view. The prior path did dstack (copy) + tobytes
         # (copy) + bytearray (copy) = 3 copies / ~60MB per 1080p frame (audit R4).
@@ -267,10 +303,6 @@ class LiveKitAdapter:
         bgra[:, :, :3] = frame_bgr
         bgra[:, :, 3] = 255
         if self._rtc is not None and self._source is not None:
-            # VideoFrame(w, h, VideoBufferType.BGRA, data); capture_frame stamps
-            # timestamp_us (microseconds) — the audio-inherited PTS. bytearray
-            # over the contiguous buffer is the one unavoidable copy into the
-            # rtc frame (it owns its bytes).
             frame = self._rtc.VideoFrame(w, h, self._rtc.VideoBufferType.BGRA, bytearray(bgra.tobytes()))
             self._source.capture_frame(frame, timestamp_us=int(pts * 1e6))
         elif self._mock is not None:
@@ -278,9 +310,22 @@ class LiveKitAdapter:
                 {"pts": pts, "w": w, "h": h, "data": bgra, "timestamp_us": int(pts * 1e6)}
             )
         else:
-            # Not connected yet (async host, _go still running) — drop rather
-            # than crash so a slow connect does not kill the render loop.
             log.debug("publish_frame before ready (pts=%.3fs); dropped", pts)
+
+    def _publish_loop(self) -> None:
+        # Drain the publish queue on a dedicated thread so the GIL held during
+        # bgra.tobytes()/capture_frame does not block the render thread's numpy
+        # readback (A3 GIL-contention fix). Polls; exits on close.
+        while not self._closed:
+            try:
+                if not self._pub_q:
+                    time.sleep(0.001)
+                    continue
+                frame_bgr, pts, w, h = self._pub_q.popleft()
+                self._publish_one(frame_bgr, pts, w, h)
+            except Exception as e:
+                log.warning("publish_loop frame failed (pts=%.3fs %s)", pts, e)
+        log.info("publish thread exited")
 
     def on_inbound_audio(self, pcm: np.ndarray, pts: float) -> None:
         # FR-LK-002: inbound LiveKit audio -> session.push_audio with PTS.
@@ -292,6 +337,8 @@ class LiveKitAdapter:
         # is cleaned up. Unpublish the track first (audit P2-9). Cancel the
         # reconnect watchdog so it does not race teardown (audit H1).
         self._closed = True
+        if self._pub_t is not None and self._pub_t.is_alive():
+            self._pub_t.join(timeout=1.0)
         if self._reconnect_task is not None and not self._reconnect_task.done():
             self._reconnect_task.cancel()
         if self._track is not None and self._room is not None:

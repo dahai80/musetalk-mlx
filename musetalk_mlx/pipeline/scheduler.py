@@ -62,8 +62,12 @@ class RenderScheduler:
         self._reuse = 0
         self._ddim_unavailable_logged = False
 
-    def next_step(self, ladder) -> object | None:
+    def next_step(self, ladder, pop: bool = True) -> object | None:
         # Hot-loop body of get_output_frame after the idle checks (see session).
+        # pop=False: the dedicated render thread drives this — round(s) are
+        # rendered+emitted but the frame stays in out_q for the consumer
+        # (get_output_frame); popping here would make the producer eat its own
+        # output (A3 finding 2026-09-21: 150 rounds rendered, 0 frames in q).
         # Single thermal read per frame: the stateless thermal_tier() reads OS
         # state each call, and two reads in one frame (get_output_frame + _render)
         # can straddle a state flip — batched dispatch commits to normal while
@@ -90,27 +94,41 @@ class RenderScheduler:
                 # (audit A4 — prior code re-read thermal_tier() here, racing
                 # the dispatch decision).
                 self._render_all_singly(ladder)
+                if not pop:
+                    return None
                 if self._out_q:
                     return self._out_q.popleft()
                 return None
             state = self._inflight.popleft()
             self._finish_round(state)
+            if not pop:
+                # Wait until the paste/emit for this round has completed, then
+                # leave the frame(s) queued for the consumer (pop=False: do
+                # NOT take one — see _wait_out_q).
+                self._wait_out_q(pop=False)
+                return None
             return self._wait_out_q()
         chunk, pts = self._pending.popleft()
         frame = self._render(chunk, ladder)
         self._emit(frame, pts)
+        if not pop:
+            return None
         return self._out_q.popleft()
 
-    def _wait_out_q(self, timeout_s: float = 0.2):
+    def _wait_out_q(self, timeout_s: float = 0.2, pop: bool = True):
         # Paste/emit runs on the worker thread (mp paste round trip ~15ms);
         # briefly wait so None keeps its pre-async meaning: nothing pending
         # anywhere, not "paste still in flight". Poll, never block forever.
+        # pop=False (render-thread producer path): wait for emit WITHOUT
+        # taking a frame — popping here discards it (the caller returns None)
+        # and half the rendered output never reaches the consumer (A3 finding
+        # 2026-09-21: 1500 emitted, 750 published, out_q empty — 2:1 loss).
         deadline = time.monotonic() + timeout_s
         while not self._out_q:
             if time.monotonic() >= deadline:
                 return None
             time.sleep(0.002)
-        return self._out_q.popleft()
+        return self._out_q.popleft() if pop else None
 
     def _submit_round(self) -> bool:
         # Batched hot path (PRD 30FPS): one UNet + one VAE decode per BATCH

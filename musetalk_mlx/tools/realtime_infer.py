@@ -86,6 +86,11 @@ def main() -> int:
         session.interrupt()
 
     signal.signal(signal.SIGUSR1, _barge_in)
+
+    def _term(_sig, _frm):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _term)
     # PTS domain: the windower derives output PTS from consumed audio samples
     # (relative 0). Mixing a file source (--audio, relative 0) with inbound
     # LiveKit audio (real-time PTS) would make output PTS discontinuous and
