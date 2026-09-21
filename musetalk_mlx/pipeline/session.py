@@ -86,6 +86,7 @@ class MuseTalkSession:
         self._mask = mask_provider if mask_provider is not None else load_face_parse()
         self._pending = deque()  # (chunk (50,384), pts seconds)
         self._out_q = deque()  # rendered (frame, pts) awaiting get_output_frame
+        self._sink = None  # optional FrameSink: _emit feeds both out_q and sink
         self._last_frame = None
         self._audio_prefix = None  # fusion-mlx #914: prior window's tail embedding
         self.profiler = StageProfiler()
@@ -369,6 +370,18 @@ class MuseTalkSession:
             log.warning("push_audio got %s, casting to float32", arr.dtype)
         self._windower.push(pcm)
         self._render_ev_set()
+
+    def set_sink(self, sink) -> None:
+        # Attach a FrameSink (FR-LK-001): _emit feeds both _out_q (for the
+        # get_output_frame loop) and the sink (ZeroCopySink for offline/native
+        # encoders, or any custom sink). The sink is an additional consumer,
+        # not a replacement — get_output_frame still works. Pass None to detach.
+        # Live path does NOT use this (LiveKitAdapter consumes via the
+        # get_output_frame loop + publish_frame); this is for offline renderers
+        # and future native VideoToolbox direct-encoding sinks.
+        self._sink = sink
+        if sink is not None:
+            log.info("FrameSink attached: %s", type(sink).__name__)
 
     def _render_loop(self) -> None:
         # Dedicated producer thread: pumps RenderScheduler.next_step while
@@ -656,6 +669,15 @@ class MuseTalkSession:
                 self._out_q.popleft()
                 log.warning("out_q full (%d), dropped oldest frame", self._out_q_cap)
             self._out_q.append((frame, pts))
+            # Feed the attached sink (if any) — FR-LK-001 egress abstraction.
+            # ZeroCopySink.emit routes through the MetalZeroCopyBridge (#913).
+            # Sink failures are isolated: a broken sink must not stall the
+            # render loop or drop frames from _out_q (audit P2-9 isolation).
+            if self._sink is not None:
+                try:
+                    self._sink.emit(frame, pts)
+                except Exception as e:
+                    log.warning("sink emit failed (%s); out_q unaffected", e)
 
     def _paste_worker(self) -> None:
         # Render-thread offload: paste + emit for rounds whose parse-mask was

@@ -79,10 +79,17 @@ def main() -> int:
     p.add_argument("--fps", type=int, default=30)
     p.add_argument("--bbox-shift", type=int, default=0, help="upperbondrange passthrough (face crop y-shift)")
     p.add_argument("--max-frames", type=int, default=0, help="stop after N frames (0 = all audio)")
+    p.add_argument(
+        "--sink",
+        default="zerocopy",
+        choices=["zerocopy", "numpy"],
+        help="egress sink: zerocopy (MetalZeroCopyBridge #913, FR-LK-001) or numpy",
+    )
     a = p.parse_args()
 
     from musetalk_mlx import MuseTalkSession
     from musetalk_mlx.face.crop import FaceCropper
+    from musetalk_mlx.pipeline.frame_sink import make_sink
 
     out_path = Path(a.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -91,6 +98,16 @@ def main() -> int:
     wav, _ = librosa.load(a.audio, sr=16000)
     log.info("audio %.1fs pushed into session", len(wav) / 16000)
     session.push_audio(wav)
+
+    # Attach the egress sink (FR-LK-001). ZeroCopySink routes each emitted
+    # frame through the #913 MetalZeroCopyBridge (IOSurface-backed CVPixelBuffer)
+    # — the production egress abstraction. The imageio writer below still
+    # consumes via get_output_frame for the mp4 mux; the sink is the
+    # zero-copy path for future native VideoToolbox direct-encoding. numpy sink
+    # is the torch-free fallback when the bridge is unavailable.
+    first_bg = session._bg_frame()
+    sink = make_sink(a.sink, width=first_bg.shape[1], height=first_bg.shape[0])
+    session.set_sink(sink)
 
     writer = imageio.get_writer(str(out_path), fps=a.fps)
     n = 0
@@ -114,6 +131,8 @@ def main() -> int:
             n += 1
     finally:
         writer.close()
+        sink.close()
+        session.set_sink(None)
     tail = session._windower.buf.size / session._windower.sr
     if tail > 0:
         log.warning("%.2fs trailing audio left unprocessed (< 1 window)", tail)
