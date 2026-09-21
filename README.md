@@ -193,7 +193,7 @@ server) and are retracted; the A3 LiveKit E2E table above is clean-GPU.
 | [#920](https://github.com/dahai80/fusion-mlx/issues/920) | Default allocator cache grows unbounded, multi-second render spikes — **fixed v0.10.3** | 3 |
 | [#921](https://github.com/dahai80/fusion-mlx/issues/921) | Metal conv2d fp16 kernel cliffs — sole remaining 30FPS blocker (decode 58ms -> ~20ms needed) | 3 |
 | [#924](https://github.com/dahai80/fusion-mlx/issues/924) | MSL fused Conv+GN+SiLU kernel — open, blocks 30FPS (decode ~45ms -> ~20ms) | 3 |
-| [#927](https://github.com/dahai80/fusion-mlx/issues/927) | `set_ddim_steps` API missing — serious-tier step-cut is a no-op, thermal ladder jumps normal->critical | 3 |
+| [#927](https://github.com/dahai80/fusion-mlx/issues/927) | `set_ddim_steps` runtime DDIM step-count setter — **closed v0.10.5**: `pipe.set_ddim_steps(n)` sets the pipe's `_ddim_steps` state; `_run_unet(steps=None)` consumes it. musetalk-mlx's realtime hot loop stays single-step (steps=1, t=0) to hold the 33ms budget; the serious-tier step-cut (15→8) takes effect on the offline multi-step path via `_apply_ddim_steps` | 3 |
 | [#928](https://github.com/dahai80/fusion-mlx/issues/928) | Public API contract — musetalk-mlx reaches into private attrs (`_dtype`/`UNET_TIMESTEP`/`apply_pe`/`unet`); version lock is a fallback, not a contract — **closed v0.10.5, migrated to `pipe.dtype`/`pipe._run_unet`** | 3 |
 | [#932](https://github.com/dahai80/fusion-mlx/issues/932) | `apply_patterns` matches 0 modules on MuseTalk UNet/VAE — pattern matcher blind to code-level GN→SiLU→Conv call sequences; sole remaining 30FPS blocker (render_eval 108ms/round, need 66ms) | 3 |
 

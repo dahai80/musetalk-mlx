@@ -301,15 +301,14 @@ class RenderScheduler:
         return pipe._run_unet(latent, audio, steps)
 
     def _apply_ddim_steps(self, steps: int) -> None:
-        # #927 landed: fusion-mlx MuseTalkPipeline.set_ddim_steps exists and
-        # sets the pipe's _ddim_steps state. NOTE: musetalk-mlx's realtime render
-        # path (_unet_forward / compiled closures) calls pipe._run_unet with
-        # steps=1 (single-step t=0) to hold the 33ms budget — multi-step DDIM
-        # (15/8) is Nx slower and breaks 30FPS. set_ddim_steps is therefore
-        # invoked here for observability + future offline multi-step paths, but
-        # the realtime hot loop stays single-step. The serious-tier compute
-        # lever for realtime is patch/bg-downscale/frame-reuse at critical,
-        # not step-cut.
+        # #927 closed in fusion-mlx v0.10.5: pipe.set_ddim_steps(n) sets the
+        # pipe's _ddim_steps state; _run_unet(steps=None) consumes it. The
+        # realtime hot loop calls _unet_forward with steps=1 (single-step t=0)
+        # to hold the 33ms budget — multi-step DDIM (15/8) is Nx slower and
+        # breaks 30FPS, so the serious-tier step-cut takes effect only on the
+        # offline multi-step path (which passes steps=None to _run_unet). The
+        # serious-tier compute lever for realtime is patch/bg-downscale/
+        # frame-reuse at critical, not step-cut.
         setter = getattr(self._pipe_getter(), "set_ddim_steps", None)
         if setter is not None:
             setter(steps)
@@ -319,7 +318,7 @@ class RenderScheduler:
             self._ddim_unavailable_logged = True
             log.warning(
                 "set_ddim_steps unavailable on fusion-mlx pipe; serious-tier "
-                "step-cut is a no-op. Upgrade fusion-mlx >=0.10.3."
+                "step-cut is a no-op. Upgrade fusion-mlx >=0.10.5."
             )
 
     def _decode_faces(self, img) -> np.ndarray:

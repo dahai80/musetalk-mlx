@@ -181,7 +181,7 @@ fusion-mlx 服务器污染，已撤回；上表 A3 LiveKit E2E 为干净 GPU 数
 | [#920](https://github.com/dahai80/fusion-mlx/issues/920) | 默认 allocator cache 无界增长 — **v0.10.3 已修** | 3 |
 | [#921](https://github.com/dahai80/fusion-mlx/issues/921) | Metal conv2d fp16 kernel 悬崖 — 30FPS 最后阻塞项（decode 58ms 需降到 ~20ms） | 3 |
 | [#924](https://github.com/dahai80/fusion-mlx/issues/924) | MSL fused Conv+GN+SiLU kernel — open，阻塞 30FPS（decode ~45ms 需降到 ~20ms） | 3 |
-| [#927](https://github.com/dahai80/fusion-mlx/issues/927) | `set_ddim_steps` API 缺失 — serious 档 step-cut 空操作，温控阶梯 normal→critical 直跳 | 3 |
+| [#927](https://github.com/dahai80/fusion-mlx/issues/927) | `set_ddim_steps` 运行时 DDIM 步数 setter — **v0.10.5 已闭**：`pipe.set_ddim_steps(n)` 设 pipe 的 `_ddim_steps` 状态；`_run_unet(steps=None)` 消费它。musetalk-mlx 实时热循环保持单步（steps=1, t=0）以守 33ms 预算；serious 档步削（15→8）在离线多步路径经 `_apply_ddim_steps` 生效 | 3 |
 | [#928](https://github.com/dahai80/fusion-mlx/issues/928) | 公共 API 契约 — musetalk-mlx 访问私有属性（`_dtype`/`UNET_TIMESTEP`/`apply_pe`/`unet`）；版本锁是兜底非契约 — **v0.10.5 已闭，迁移到 `pipe.dtype`/`pipe._run_unet`** | 3 |
 | [#932](https://github.com/dahai80/fusion-mlx/issues/932) | `apply_patterns` 在 MuseTalk UNet/VAE 上 0 匹配 — pattern matcher 看不到代码级 GN→SiLU→Conv 调用序列；30FPS 最后阻塞项（render_eval 108ms/round，需 66ms） | 3 |
 
