@@ -663,6 +663,11 @@ class MuseTalkSession:
         self._compiled_generate = None
         self._compiled_generate_128 = None
 
+    def _wait_out_q(self, timeout_s: float = 0.2):
+        # Thin delegate: the wait loop lives on the scheduler (owns the round
+        # machinery) but idle callers on the session still hit this name.
+        return self._scheduler._wait_out_q(timeout_s)
+
     def _bg_cache_snapshot(self):
         # Snapshot the cache list under the lock so a concurrent reload
         # swap cannot detach the reference mid-iteration (audit R8).

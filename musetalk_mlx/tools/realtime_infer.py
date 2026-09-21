@@ -1,10 +1,60 @@
 import argparse
+import json
 import logging
 import sys
+import threading
+import time
+from collections import deque
+from pathlib import Path
 
 import librosa
 
 log = logging.getLogger(__name__)
+
+
+class _RttProbe:
+    # File-source RTT probe (audit 0921 A-3): audio is fed in --chunk-ms chunks
+    # paced at real time; RTT of a published frame = publish wall time minus the
+    # push wall time of the first feeder chunk whose sample coverage includes
+    # the frame PTS. SCOPE: this includes the AudioWindower 5s window buffering
+    # (hop 4.8s) — the PRD-level streaming-latency clarification is tracked
+    # separately and is NOT silently redesigned here.
+    def __init__(self, sr: int):
+        self.sr = sr
+        self._pushes = deque(maxlen=8192)  # (wall, samples pushed so far)
+        self._total = 0
+        self._rtts = []
+
+    def on_push(self, n: int) -> None:
+        self._total += n
+        self._pushes.append((time.monotonic(), self._total))
+
+    def on_publish(self, pts: float) -> None:
+        target = int(pts * self.sr)
+        for wall, end in self._pushes:
+            if end >= target:
+                self._rtts.append(time.monotonic() - wall)
+                return
+        log.debug("no covering push for pts=%.3f", pts)
+
+    def write_report(self, path: str) -> dict:
+        rt = sorted(self._rtts)
+
+        def pct(q):
+            return rt[min(len(rt) - 1, int(q * len(rt)))] * 1000 if rt else 0.0
+
+        report = {
+            "frames": len(rt),
+            "rtt_p50_ms": round(pct(0.50), 2),
+            "rtt_p95_ms": round(pct(0.95), 2),
+            "rtt_max_ms": round(pct(1.0), 2),
+            "scope_note": "includes AudioWindower 5s window buffering (hop 4.8s)",
+        }
+        path_ = Path(path)
+        path_.parent.mkdir(parents=True, exist_ok=True)
+        path_.write_text(json.dumps(report, indent=2))
+        log.info("RTT report -> %s: %s", path_, report)
+        return report
 
 
 def main() -> int:
@@ -18,6 +68,8 @@ def main() -> int:
     p.add_argument("--fps", type=int, default=30)
     p.add_argument("--width", type=int, default=1920)
     p.add_argument("--height", type=int, default=1080)
+    p.add_argument("--rtt-report", default="results/realtime_rtt.json")
+    p.add_argument("--chunk-ms", type=int, default=100, help="file-source feeder chunk size")
     a = p.parse_args()
 
     from musetalk_mlx import MuseTalkSession
@@ -54,9 +106,31 @@ def main() -> int:
         return 1
     log.info("realtime session up; audio source=%s -> LiveKit", audio_source)
 
+    probe = None
     if a.audio:
         wav, _ = librosa.load(a.audio, sr=16000)
-        session.push_audio(wav)
+        if audio_source == "file":
+            # File source: feed in real-time paced chunks so publish-side RTT
+            # can attribute each frame to its covering audio chunk (audit A-3).
+            probe = _RttProbe(session.sr)
+            chunk = session.sr * a.chunk_ms // 1000
+
+            def _feeder():
+                step = chunk / session.sr
+                t0 = time.monotonic()
+                for i, off in enumerate(range(0, len(wav), chunk)):
+                    piece = wav[off : off + chunk]
+                    session.push_audio(piece)
+                    probe.on_push(len(piece))
+                    target = t0 + (i + 1) * step
+                    now = time.monotonic()
+                    if target > now:
+                        time.sleep(target - now)
+                log.info("feeder done: %.1fs of audio streamed", len(wav) / session.sr)
+
+            threading.Thread(target=_feeder, name="audio-feeder", daemon=True).start()
+        else:
+            session.push_audio(wav)
 
     from musetalk_mlx.pipeline.pacing import PacedPublisher
 
@@ -64,13 +138,24 @@ def main() -> int:
     # loop's idle sleep — no busy wait, overrun accounting, jitter report.
     pacer = PacedPublisher(a.fps, report_path="results/realtime_pacing.json")
     pacer.start()
+
+    def _publish(frame, pts):
+        adapter.publish_frame(frame, pts)
+        if probe is not None:
+            probe.on_publish(pts)
+
     try:
         while True:
-            pacer.tick(session.get_output_frame, adapter.publish_frame)
+            pacer.tick(session.get_output_frame, _publish)
     except KeyboardInterrupt:
         log.info("stopping")
+    except BaseException:
+        log.exception("publish loop terminated")
+        raise
     finally:
         pacer.write_report()
+        if probe is not None:
+            probe.write_report(a.rtt_report)
         adapter.close()
         session.close()
     return 0
