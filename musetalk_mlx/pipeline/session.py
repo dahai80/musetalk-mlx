@@ -24,6 +24,40 @@ from .scheduler import RenderScheduler
 log = logging.getLogger(__name__)
 
 
+def _verify_mlx_dir(mlx_dir) -> None:
+    # Release-audit P0-4: a torch-free terminal user obtains pre-converted MLX
+    # safetensors out-of-band (HF mirror / signed bundle). Trust-on-first-load
+    # is unacceptable for commercial distribution — a tampered bundle poisons
+    # the lip-sync output. If a manifest.json is present, verify integrity
+    # (sha256 per file) + optional Ed25519 authenticity before load. A FAILED
+    # verification raises and aborts the load; a missing manifest only warns
+    # (dev/convert flow has none yet) so we don't break local dev. Disable with
+    # MT_WEIGHTS_VERIFY=0 (emergency only).
+    import os
+    from pathlib import Path
+
+    if os.environ.get("MT_WEIGHTS_VERIFY", "1") == "0":
+        log.warning("MT_WEIGHTS_VERIFY=0: weight integrity check skipped (emergency override)")
+        return
+    from ..utils.weights_verify import verify_weights
+
+    d = Path(mlx_dir)
+    manifest = d / "manifest.json"
+    if not manifest.exists():
+        log.warning(
+            "no manifest.json in %s; trust-on-first-load (run musetalk-mlx-download or musetalk-mlx-sign)",
+            d,
+        )
+        return
+    pubkey_env = os.environ.get("MT_WEIGHTS_PUBKEY")
+    pubkey_pem = Path(pubkey_env).read_bytes() if pubkey_env else None
+    ok, reason = verify_weights(d, pubkey_pem=pubkey_pem)
+    if ok:
+        log.info("weight verification OK: %s", reason)
+    else:
+        raise RuntimeError(f"weight verification FAILED in {d}: {reason}; refusing to load tampered weights")
+
+
 def _unet_forward(pipe, latent, chunk, steps=1):
     # Plain (uncompiled) UNet forward via the #928 public render core
     # (pipe._run_unet encapsulates timestep / apply_pe / dtype). steps=1 is the
@@ -210,6 +244,7 @@ class MuseTalkSession:
         # path. Mirror config.SMART_CONV explicitly on every call.
         os.environ["FUSION_MUSETALK_SMART_CONV"] = "1" if config.SMART_CONV else "0"
         if mlx_dir is not None:
+            _verify_mlx_dir(mlx_dir)
             return MuseTalkPipeline.from_pretrained_mlx(mlx_dir)
         return MuseTalkPipeline.from_pretrained(weights_dir)
 

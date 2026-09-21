@@ -55,6 +55,12 @@ eval = [
     "scikit-image>=0.22",
     "librosa>=0.10",
 ]
+sign = [
+    # Ed25519 authenticity for the weight manifest (release-audit P0-4). The
+    # download tool is stdlib-only (urllib); signing needs cryptography. The
+    # load-time verifier degrades to sha256-integrity-only without it.
+    "cryptography>=42",
+]
 
 [project.scripts]
 musetalk-mlx-offline = "musetalk_mlx.tools.offline_infer:main"
@@ -64,6 +70,8 @@ musetalk-mlx-stress = "musetalk_mlx.tools.stress:main"
 musetalk-mlx-benchmark = "musetalk_mlx.tools.benchmark:main"
 musetalk-mlx-eval = "musetalk_mlx.tools.eval:main"
 musetalk-mlx-gen-gt = "musetalk_mlx.tools.gen_gt:main"
+musetalk-mlx-download = "musetalk_mlx.tools.download_weights:main"
+musetalk-mlx-sign = "musetalk_mlx.tools.sign_weights:main"
 
 [tool.setuptools.packages.find]
 include = ["musetalk_mlx*"]

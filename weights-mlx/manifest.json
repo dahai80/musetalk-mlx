@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "files": {
+    "unet.safetensors": {
+      "sha256": "7c9baaf78ede79c8d027ef1d084bfd93893d3244d019afa78e7de69767e00ff6",
+      "size": 3399875139
+    },
+    "vae.safetensors": {
+      "sha256": "f55b51fb97d12c2be7367f02c8369f40332c677d624ceb61312f03a7d821bb63",
+      "size": 334643161
+    },
+    "whisper_encoder.safetensors": {
+      "sha256": "f38ae05b5f36034b3fc49c99f94c0ff9499e8861f6443e5b744e4400e96e65a9",
+      "size": 32840002
+    },
+    "config.json": {
+      "sha256": "6e78b0638cdc4257d5d9e8745b0e5239821d167fa837110fab047a94fc9706e8",
+      "size": 53
+    }
+  }
+}
