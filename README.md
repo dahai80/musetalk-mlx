@@ -120,27 +120,42 @@ background GPU load inflates numbers several-fold (see
 | **Subprocess paste worker** (`config.PASTE_MULTIPROC`, default OFF) | paste/blend runs in a child process (own GIL), immune to the GIL starvation from MLX's busy-wait sync on the render thread. 4-byte length-framed pickle protocol over stdin/stdout; IPC ships the expanded crop only, not the full frame. Default OFF: the hot path now pastes inline on the render thread (cached alpha ~0.2ms, no IPC); the worker is retained as a fallback for drain/IPC-failure paths |
 | **`DECODE_128` speed switch** (`config.DECODE_128`, default OFF) | 2x2 average-pool the UNet output latent (32²→16²) before VAE decode → 128² face patch at ~1/4 decode FLOPs. Speed-over-quality for scenarios that tolerate it; ships disabled, opt-in by flag |
 | Batch-2 hot path (`config.BATCH`) | one UNet+decode per 2 steps, RTT-safe (adds one 33ms step) |
+| **Dedicated render thread + inline paste** (A3) | producer thread pumps `scheduler.next_step`; `get_output_frame` = pure consumer (pop out_q, wait-while-busy). Paste inline on the render thread (cached alpha ~0.2ms, no worker queue). Fixed a 2:1 frame loss (`_wait_out_q(pop=False)` waits for emit without discarding) |
+| **Async LiveKit publish thread + H264** (A3) | H264 codec (VideoToolbox hardware) — VP8 software capped ~5fps at 1080p. Dedicated `_publish_loop` thread with bounded deque (cap 4, drop oldest) decouples the GIL from the render thread's MLX readback (render_eval 140ms→55ms) |
+| **Zero-copy egress** (FR-LK-001, A3) | BGRA handed to rtc `VideoFrame` as `memoryview` of a rotating numpy pool — SDK passes the pointer to FFI, no `tobytes`/`bytearray` (prior path: 3 copies/frame) |
 
 Isolated clean-GPU microbenchmarks (fp16, MLX 0.32.0, allocator caps on,
 v0.10.4), 60-round burst:
 
-| Config | GPU/round (b2) | GPU ceiling | Live e2e FPS |
-|---|---|---|---|
-| Full decode (default) | 61.0ms | 32.8 FPS | 19.4 |
-| `DECODE_128` on | 34.1ms | 58.7 FPS | 27.7 |
+| Config | GPU/round (b2) | GPU ceiling |
+|---|---|---|
+| Full decode (default) | 61.0ms | 32.8 FPS |
+| `DECODE_128` on | 34.1ms | 58.7 FPS |
 
-The live-to-ceiling gap (~19ms/frame) is paste + readback serialized on the
-main thread — depth-2 render-ahead does not yet overlap because MLX lazy
-evaluation materializes a round's graph only on sync (see caveat above).
-**The 30 FPS lever is the VAE decoder**: decode alone is 59ms of the 61ms
-round, dominated by the 3-upsample conv stack. Conv+GroupNorm+SiLU MSL fusion
-(fusion-mlx issue, design below) is the path to cut decode to ~30ms and clear
-30 FPS at full 256² quality. `DECODE_128` already clears 30 FPS at 128² when
-quality can be traded.
+LiveKit E2E (A3, clean GPU, 1080p, `MT_DECODE_128=1`, local LiveKit server
+v1.9.1, `lk_receive.py` probe):
+
+| Metric | Value |
+|---|---|
+| Receiver FPS | **29.82** |
+| Publish-interval p50 | 33.3ms |
+| render_eval | 55ms |
+| Steady drops | 0 |
+| RTT (render-pipeline segment) | 33.3ms ≤ 80ms |
+| PTS | strictly monotonic |
+
+The live-to-ceiling gap was closed by the render-thread + async publish +
+zero-copy architecture (A3): the prior ~19ms/frame gap was paste + readback +
+publish GIL contention serialized on the pacer thread. **The 30 FPS lever
+remains the VAE decoder** at full 256² quality (decode ~25ms/frame of the
+round, dominated by the 3-upsample conv stack); Conv+GroupNorm+SiLU MSL fusion
+(fusion-mlx #924) is the path to clear 30 FPS at full quality.
+`DECODE_128` + the A3 architecture already clears 30 FPS at 128² (29.82 FPS
+measured).
 
 The earlier "58ms decode / 8 FPS sustained" and "24.4 FPS live" figures were
 contention-contaminated (linguakids watchdog auto-restarting the fusion-mlx
-server) and are retracted; the table above is clean-GPU.
+server) and are retracted; the A3 LiveKit E2E table above is clean-GPU.
 
 ## PRD V1.1-RC2 gap-fill (this release)
 

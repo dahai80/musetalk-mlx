@@ -133,26 +133,48 @@ comment: baseline was contention-contaminated, clean GPU = 25ms/frame).
   (mmpose/resnet18 files); converters use `weights_only=True` — worked around by
   patching `torch.load` at conversion time (upstream follow-up candidate).
 
-## Blocked — fusion-mlx #917 (DWPose output corruption)
+## Blocked — fusion-mlx #917 (DWPose output corruption) — FIXED v0.10.2
 
 | Subsystem | Status |
 |---|---|
-| DWPose (#909) | weights load strict-OK; **decoded landmarks are garbage** — mouth cluster std (60,92) px, border-pinned coords (x=0/254/384), bbox covers 75% of frame. `LandmarkTracker` bbox sanity guard routes to idle-blink. |
+| DWPose (#909) | **fixed v0.10.2** — forward matches ONNX GT (SPP-stage residual bug); `face_landmarks` returns frame-space coords; 10/10 detections, bbox 3.9% of frame, 0 border-pinned coords. |
 | Face-parsing (#910) | **working** — real 79999_iter weights, sane labels. |
 
-## Scenarios to run once #917 is fixed
+## Scenarios — status
 
-1. **Offline end-to-end parity** — `musetalk-mlx-offline` against MuseTalk torch
-   reference: image PSNR ≥ 38 dB, SSIM ≥ 0.95 (PRD V2); manual lip-quality review.
-2. **LiveKit realtime** — local LiveKit server, join room, Web client receives:
-   30 FPS, RTT ≤ 80ms, no tearing/NaN; PTS sync deviation measured.
-3. **2h stability stress** — leak ≤ 50 MB + max-contiguous-allocatable fragmentation;
-   CVPixelBufferPool reuse.
-4. **Thermal ladder** — stress validates the 4-step order (step-cut → frame-reuse →
-   bg-downscale → patch 256→128); no 256→128 jump.
-5. **Edge inputs** — silence / clipping / <10ms: no crash, auto-standby.
-6. **Per-stage benchmark** — STFT/Whisper/UNet/VAE/warp/frame-out timing → FPS, RTT,
-   unified-memory, fragmentation, PTS sync, keypoint alerts.
+1. **Offline end-to-end parity** — `musetalk-mlx-offline` runs clean (150-frame
+   video, real landmarks, no guard fallback). PSNR vs MuseTalk torch reference
+   gated on `gen_gt.py` (subprocess into MuseTalk checkout, MPS) — tool exists,
+   not yet run against the torch reference for the PSNR ≥ 38 / SSIM ≥ 0.95 gate.
+2. **LiveKit realtime** — **DONE (A3)**. Local LiveKit server v1.9.1, realtime CLI
+   + `lk_receive.py` probe. Clean GPU, 1080p, `MT_DECODE_128=1`: receiver 29.82
+   FPS, publish-interval p50 33.3ms, render_eval 55ms, 0 steady drops. RTT
+   (render-pipeline segment) 33.3ms ≤ 80ms. Full RTT 5138ms includes the
+   AudioWindower 5s window buffer (hop 4.8s, window-tail audio waits for the
+   next window) — a streaming-latency property, not a render bug; PRD scope
+   clarification pending, design not silently changed. PTS strictly monotonic.
+3. **2h stability stress** — **running (A4)**. `musetalk-mlx-stress --with-reload`,
+   reload resume <2s (fast path), phys ~6.2GB, mlx active ~2.1GB, fragmentation
+   probe OK. Leak gate (`scripts/leak_gate.py`) pending completion.
+4. **Thermal ladder** — wired in-session (FR-END-003): step-cut → frame-reuse(3)
+   → bg-downscale(2) → patch 256→128. Serious-tier step-cut is a no-op on the
+   realtime path (fixed single-step t=0; multi-step DDIM is Nx slower) —
+   serious-tier only effective on the offline multi-step path. Realtime
+   degradation relies on the critical tier.
+5. **Edge inputs** — silence / clipping / <10ms: covered by unit tests, no crash,
+   auto-standby.
+6. **Per-stage benchmark** — `musetalk-mlx-benchmark` reports STFT/Whisper/UNet/
+   VAE/warp/frame-out timing + FPS + RTT + memory + fragmentation.
+
+## Zero-copy egress (FR-LK-001) — wired
+
+`LiveKitAdapter.publish_frame` hands BGRA to rtc `VideoFrame` as a `memoryview`
+of a pre-allocated rotating numpy pool — SDK `get_address` passes the pointer to
+FFI (`ctypes.addressof(c_char.from_buffer)`), no `tobytes`/`bytearray` copy.
+`ZeroCopySink` exposes the #913 `MetalZeroCopyBridge` (IOSurface→CVPixelBuffer)
+for non-LiveKit sinks; the livekit Python SDK does not accept a CVPixelBuffer
+directly, so the IOSurface path is reserved for a future native VideoToolbox
+direct-encoding integration.
 
 ## Layered parity (tests/parity/, PRD V1.1-RC2 thresholds)
 

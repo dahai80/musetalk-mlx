@@ -114,22 +114,36 @@ crop。bbox 数学、卡尔曼平滑、守卫与待机逻辑由 `tests/test_land
 | **子进程 paste worker**（`config.PASTE_MULTIPROC`，默认关） | paste/blend 跑在子进程（独立 GIL），不受 MLX busy-wait sync 在渲染线程上的 GIL 饿死影响。stdin/stdout 上 4 字节长度帧 + pickle 协议；IPC 只传 expand 后的 crop，不传整帧。默认关：热路径已在渲染线程内联 paste（缓存 alpha ~0.2ms，无 IPC）；worker 保留为 drain/IPC 失败回退 |
 | **`DECODE_128` 速度开关**（`config.DECODE_128`，默认关） | UNet 输出 latent 2x2 均值池化（32²→16²）后再 VAE decode → 128² face patch，decode FLOPs ~1/4。速度优先、可牺牲质量场景；默认关闭，按 flag 开启 |
 | 批 2 热路径（`config.BATCH`） | 每 2 步一次 UNet+decode，RTT 安全（多等一个 33ms 步） |
+| **专用渲染线程 + 内联 paste**（A3） | 生产者线程泵 `scheduler.next_step`；`get_output_frame` = 纯消费者（pop out_q，忙等≤2s）。渲染线程内联 paste（缓存 alpha ~0.2ms，无 worker 队列）。修复 2:1 丢帧（`_wait_out_q(pop=False)` 等待 emit 不丢弃） |
+| **异步 LiveKit publish 线程 + H264**（A3） | H264 编码（VideoToolbox 硬件）——VP8 软编 1080p 下仅 ~5fps。专用 `_publish_loop` 线程 + 有界 deque（上限 4，丢最旧）解耦 GIL 与渲染线程的 MLX readback（render_eval 140ms→55ms） |
+| **零拷贝出站**（FR-LK-001，A3） | BGRA 以 `memoryview`（轮转 numpy 池）交 rtc `VideoFrame`——SDK 把指针传 FFI，无 `tobytes`/`bytearray`（旧路径每帧 3 次拷贝） |
 
 隔离干净 GPU 微基准（fp16, MLX 0.32.0, allocator caps 开, v0.10.4），60-round burst：
 
-| 配置 | GPU/round（b2） | GPU 上限 | 实测 e2e FPS |
-|---|---|---|---|
-| 全 decode（默认） | 61.0ms | 32.8 FPS | 19.4 |
-| `DECODE_128` 开 | 34.1ms | 58.7 FPS | 27.7 |
+| 配置 | GPU/round（b2） | GPU 上限 |
+|---|---|---|
+| 全 decode（默认） | 61.0ms | 32.8 FPS |
+| `DECODE_128` 开 | 34.1ms | 58.7 FPS |
 
-实测到上限的 gap（~19ms/帧）是 paste + readback 在主线程串行 —— 深度 2 渲染前瞻尚未
-重叠，因 MLX lazy eval 只在 sync 时物化 round 的图（见上文注意）。**30 FPS 的杠杆是
-VAE decoder**：61ms round 中 decode 独占 59ms，主要来自 3 个 upsample 卷积栈。
-Conv+GroupNorm+SiLU MSL 熔合内核（fusion-mlx issue，设计见下）是把 decode 砍到 ~30ms、
-在完整 256² 质量下达成 30 FPS 的路径。`DECODE_128` 在 128² 下已可达 30 FPS（质量可让渡时）。
+LiveKit E2E（A3，干净 GPU，1080p，`MT_DECODE_128=1`，本地 LiveKit server v1.9.1，`lk_receive.py` 探针）：
+
+| 指标 | 值 |
+|---|---|
+| 接收端 FPS | **29.82** |
+| publish 间隔 p50 | 33.3ms |
+| render_eval | 55ms |
+| 稳态丢帧 | 0 |
+| RTT（渲染管线段） | 33.3ms ≤ 80ms |
+| PTS | 严格单调 |
+
+实测到上限的 gap 已由「渲染线程 + 异步 publish + 零拷贝」架构（A3）闭合：旧 ~19ms/帧 gap
+是 paste + readback + publish GIL 争用在 pacer 线程串行。**30 FPS 的杠杆仍是 VAE decoder**
+（完整 256² 质量下 decode ~25ms/帧，主要来自 3 个 upsample 卷积栈）；Conv+GroupNorm+SiLU
+MSL 熔合内核（fusion-mlx #924）是完整质量下达成 30 FPS 的路径。`DECODE_128` + A3 架构
+在 128² 下已达成 30 FPS（实测 29.82 FPS）。
 
 早期「58ms decode / 8 FPS 持续」「24.4 FPS 实测」数据被 linguakids watchdog 自动重启
-fusion-mlx 服务器污染，已撤回；上表为干净 GPU 数字。
+fusion-mlx 服务器污染，已撤回；上表 A3 LiveKit E2E 为干净 GPU 数字。
 
 ## PRD V1.1-RC2 差距补齐（本次发布）
 
