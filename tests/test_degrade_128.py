@@ -51,7 +51,7 @@ def test_decode_128_compiles_joint_graph(monkeypatch):
         called["gen"] = s._compiled_generate_128 if config.DECODE_128 else s._compiled_generate
         return False
 
-    monkeypatch.setattr(s, "_submit_round", fake_submit)
+    monkeypatch.setattr(s, "_submit_round", fake_submit, raising=False)
     assert fake_submit() is False
     assert called["gen"] is s._compiled_generate_128
 

@@ -1,7 +1,6 @@
 import logging
 import queue
 import threading
-import time
 from collections import deque
 
 import mlx.core as mx
@@ -13,13 +12,14 @@ from .. import config
 from ..face.crop import FaceCropper
 from ..face.landmarks import LandmarkTracker
 from ..face.mask import load_face_parse
-from ..pipeline.blending import crop_bbox_to_xyxy, paste_back
+from ..pipeline.blending import paste_back
 from ..pipeline.lcm import LCMFastSession
 from ..pipeline.paste_proc import PasteProcess
 from ..utils.audio import AudioWindower
 from ..utils.profiling import StageProfiler
 from ..utils.thermal import ThermalController
 from .background import BackgroundStore, BgCacheEntry  # noqa: F401 -- re-export (tests import from session)
+from .scheduler import RenderScheduler
 
 log = logging.getLogger(__name__)
 
@@ -85,15 +85,14 @@ class MuseTalkSession:
         self._mask = mask_provider if mask_provider is not None else load_face_parse()
         self._pending = deque()  # (chunk (50,384), pts seconds)
         self._out_q = deque()  # rendered (frame, pts) awaiting get_output_frame
-        self._inflight = deque()  # lazily dispatched rounds (img, metas, frames, items)
         self._last_frame = None
-        self._reuse = 0
         self._audio_prefix = None  # fusion-mlx #914: prior window's tail embedding
         self.profiler = StageProfiler()
         self._croppers = {}  # patch 256/128 (thermal ladder); croppers dict stays on session
         self._expected_pts = None  # observability: PTS sync-deviation logging
         self._tune_mlx_memory()
         self._setup_graph_pass()
+        self._scheduler = self._make_scheduler()
         self._preload_bg()
         self._set_render_cache()
         # Paste worker thread: warp/blend/emit are pure cv2/numpy and run
@@ -468,51 +467,7 @@ class MuseTalkSession:
         # _render then applies critical, jumping tiers (audit A4). The controller
         # also applies hysteresis so fair<->serious chatter does not flap steps.
         ladder = self._thermal.ladder()
-        normal = ladder["frame_reuse"] == 1 and ladder["patch"] == 256 and ladder["bg_downscale"] == 1
-        gen = self._compiled_generate_128 if config.DECODE_128 else self._compiled_generate
-        if config.BATCH > 1 and normal and gen is not None:
-            # Reset steps: the batched path skips _render, so a prior thermal
-            # downgrade (single-path, low steps) would otherwise leave reduced
-            # steps stuck after recovery. Normal tier = default DDIM steps (audit P1-29).
-            self._apply_ddim_steps(ladder["ddim_steps"])
-            # Render-ahead depth 2: keep TWO lazy rounds queued so the GPU
-            # stays busy across the paste/emit CPU window (single stream runs
-            # rounds serially, but the queue must never drain while the CPU
-            # does numpy/cv2 work). Depth 1 left ~20ms/round of GPU idle
-            # (measured 89.5ms/round wall vs 72 ideal).
-            while len(self._inflight) < 2:
-                if not self._submit_round():
-                    break
-            if not self._inflight:
-                # cache miss / compiled failure: whole round falls back singly.
-                # Pass the already-read ladder so _render does NOT re-sample
-                # (audit A4 — prior code re-read thermal_tier() here, racing
-                # the dispatch decision).
-                self._render_all_singly(ladder)
-                if self._out_q:
-                    return self._out_q.popleft()
-                return None
-            state = self._inflight.popleft()
-            self._finish_round(state)
-            out = self._wait_out_q()
-            if out is not None:
-                return out
-            return None
-        chunk, pts = self._pending.popleft()
-        frame = self._render(chunk, ladder)
-        self._emit(frame, pts)
-        return self._out_q.popleft()
-
-    def _wait_out_q(self, timeout_s: float = 0.2):
-        # Paste/emit runs on the worker thread (mp paste round trip ~15ms);
-        # briefly wait so None keeps its pre-async meaning: nothing pending
-        # anywhere, not "paste still in flight". Poll, never block forever.
-        deadline = time.monotonic() + timeout_s
-        while not self._out_q:
-            if time.monotonic() >= deadline:
-                return None
-            time.sleep(0.002)
-        return self._out_q.popleft()
+        return self._scheduler.next_step(ladder)
 
     def _emit(self, frame, pts) -> None:
         # Single egress point: PTS sync-deviation observability (FR-LK-001).
@@ -534,58 +489,6 @@ class MuseTalkSession:
                 self._out_q.popleft()
                 log.warning("out_q full (%d), dropped oldest frame", self._out_q_cap)
             self._out_q.append((frame, pts))
-
-    def _submit_round(self) -> bool:
-        # Batched hot path (PRD 30FPS): one UNet + one VAE decode per BATCH
-        # steps, dispatched LAZILY (no sync). RTT-safe: BATCH=2 adds one step
-        # (66ms) — within the <=80ms audio-to-video budget. Cache miss (idle
-        # frame / thermal) requeues and returns False; caller falls back singly.
-        pf = self.profiler
-        n = min(config.BATCH, len(self._pending))
-        items = [self._pending.popleft() for _ in range(n)]
-        frames, latents, chunks, metas = [], [], [], []
-        pf.begin("frame_out")
-        for chunk, pts in items:
-            frame, bg_idx = self._bg_frame()
-            cached = None
-            # Snapshot the cache list under the lock so a concurrent reload
-            # swap cannot detach the reference mid-iteration (audit R8).
-            with self._bg_cache_lock:
-                bg_cache = self._bg_cache
-            if bg_cache and bg_idx < len(bg_cache):
-                cached = bg_cache[bg_idx]
-            if cached is None:
-                # cache miss (idle/thermal frame): render this round singly
-                pf.end()
-                self._pending.extendleft(reversed(items))
-                return False
-            frames.append(frame)
-            latents.append(cached.latent)
-            chunks.append(chunk)
-            metas.append(cached)
-        pf.end()
-        if not latents:
-            return False
-        dtype = self.pipe.dtype  # #928 public accessor
-        pf.begin("unet_build")
-        # Both args must be dtype-exact: VAE-encode latents come back fp32
-        # (SafeGroupNorm fp32 protect), and a mixed fp32/fp16 call makes
-        # mx.compile specialize a slow fp32 graph (~50x slower measured).
-        lat = mx.concatenate(latents, 0).astype(dtype)
-        ch = mx.concatenate([mx.array(c[None]) for c in chunks], 0).astype(dtype)
-        try:
-            # joint UNet+VAE-decode graph; output is RGB [0,1] (B,3,H,W)
-            gen = self._compiled_generate_128 if config.DECODE_128 else self._compiled_generate
-            img = gen(lat, ch)
-        except Exception as e:
-            log.warning("compiled batched render failed (%s); plain path", e)
-            self._compiled_generate = None
-            self._compiled_generate_128 = None
-            self._pending.extendleft(reversed(items))
-            return False
-        pf.end()
-        self._inflight.append((img, metas, frames, items))
-        return True
 
     def _paste_worker(self) -> None:
         # Render-thread offload: paste + emit for rounds whose parse-mask was
@@ -698,31 +601,6 @@ class MuseTalkSession:
             return
         self._submit_paste(frame, face, bbox, alpha if alpha.size else None, pts)
 
-    def _finish_round(self, state) -> None:
-        # Sync + materialize a previously submitted round. By now the NEXT
-        # round is already dispatched, so this sync rides on a deep GPU queue.
-        # The "render_eval" stage times the numpy readback, which is where the
-        # LAZY unet+decode graph from _submit_round actually executes on GPU.
-        # It is NOT a decode-only cost — it includes the deferred unet eval too
-        # (audit B4 profiler honesty). The "unet_build" stage in _submit_round
-        # is the CPU-side graph construction only.
-        img, metas, frames, items = state
-        pf = self.profiler
-        pf.begin("render_eval")
-        faces = self._decode_faces(img)
-        pf.end()
-        for i, meta in enumerate(metas):
-            pf.begin("warp")
-            self._paste_item(frames[i], faces[i], crop_bbox_to_xyxy(meta[1]), items[i][1])
-            pf.end()
-
-    def _render_all_singly(self, ladder) -> None:
-        # Inherit the caller's thermal ladder — _render must NOT re-sample the
-        # OS thermal state (two reads in one frame can straddle a flip, audit A4).
-        while self._pending:
-            chunk, pts = self._pending.popleft()
-            self._emit(self._render(chunk, ladder), pts)
-
     def _encode_windows(self) -> None:
         # Drain every fully-buffered overlapping 5s window into per-step chunks.
         # The windower prepends the prior window's overlap tail for boundary
@@ -753,118 +631,60 @@ class MuseTalkSession:
                 self._pending.append((chunks[i], pts0 + (i - skip) * self.step / self.sr))
             log.debug("encoded window pts=%.3fs -> %d chunks (skipped %d prefix)", pts0, n - skip, skip)
 
-    def _render(self, chunk, ladder=None) -> np.ndarray:
-        pf = self.profiler
-        pf.begin("frame_out")
-        # Caller passes the already-read ladder (single thermal read per frame,
-        # audit A4). Only read here when called outside get_output_frame (none
-        # today, but keep a safe fallback rather than asserting).
-        if ladder is None:
-            ladder = self._thermal.ladder()
-        if ladder["frame_reuse"] > 1:
-            self._reuse = (self._reuse + 1) % ladder["frame_reuse"]
-            if self._reuse and self._last_frame is not None:
-                # Copy: a consumer that mutates the returned buffer in place
-                # would otherwise pollute _last_frame and corrupt the next
-                # reused frame (audit P1-34). Non-reuse frames share the alias
-                # by contract — consumers must treat emitted frames read-only.
-                return self._last_frame.copy()
-        else:
-            self._reuse = 0
-        # step-count / ICB need fusion-mlx #911/#912; apply if the pipe exposes it.
-        self._apply_ddim_steps(ladder["ddim_steps"])
-        frame, bg_idx = self._bg_frame(downscale=ladder["bg_downscale"])
-        # FR-END-003 strategy D (last resort): face patch 256 -> 128; croppers
-        # cached per size so no 256->128 jump path skips the earlier rungs.
-        patch = ladder["patch"]
-        cached = None
+    def _make_scheduler(self):
+        # Render scheduling split (audit 0921 A-1 step 4b): injected context,
+        # pipe/tracker via getters so reload/test substitution stays live.
+        return RenderScheduler(
+            pending=self._pending,
+            out_q=self._out_q,
+            pipe_getter=lambda: self.pipe,
+            gens_getter=self._gens_getter,
+            clear_gens=self._clear_compiled_gens,
+            ladder_provider=lambda: self._thermal.ladder(),
+            bg_frame=self._bg_frame,
+            bg_cache_snapshot=self._bg_cache_snapshot,
+            emit=self._emit,
+            paste_item=self._paste_item,
+            mask=self._mask,
+            profiler=self.profiler,
+            cropper=self._cropper,
+            croppers=self._croppers,
+            tracker_getter=lambda: self._tracker,
+            last_frame_getter=lambda: self._last_frame,
+            last_frame_setter=lambda f: setattr(self, "_last_frame", f),
+        )
+
+    def _gens_getter(self):
+        return self._compiled_generate_128 if config.DECODE_128 else self._compiled_generate
+
+    def _clear_compiled_gens(self) -> None:
+        # Clear BOTH compiled entries — a partial state (main graph raised
+        # before the 128 variant) would leave inconsistent state (audit P2-4).
+        self._compiled_generate = None
+        self._compiled_generate_128 = None
+
+    def _bg_cache_snapshot(self):
+        # Snapshot the cache list under the lock so a concurrent reload
+        # swap cannot detach the reference mid-iteration (audit R8).
         with self._bg_cache_lock:
-            bg_cache = self._bg_cache
-        if bg_cache and patch == 256 and bg_idx < len(bg_cache):
-            cached = bg_cache[bg_idx]
-        if cached is not None:
-            landmarks, bbox, latent = cached
-            pf.end()
-        else:
-            landmarks = self._tracker.update(frame)
-            if landmarks is None or self._tracker.idle:
-                pf.end()
-                return frame
-            if patch not in self._croppers:
-                self._croppers[patch] = FaceCropper(size=patch, upperbondrange=self._cropper.upperbondrange)
-            crop, bbox = self._croppers[patch].crop(frame, landmarks)
-            pf.end()
-            pf.begin("vae")
-            latent = self.pipe.get_latents_for_unet(crop)
-            # #928: pipe.dtype is the public accessor (was pipe._dtype reach-in).
-            if self.pipe.dtype is not None:
-                latent = latent.astype(self.pipe.dtype)
-            pf.end()
-        pf.begin("unet")
-        face = None
-        gen = self._compiled_generate_128 if config.DECODE_128 else self._compiled_generate
-        if gen is not None:
-            # Compiled joint path: gen() returns a LAZY mx.array (graph built,
-            # not executed). The real unet+decode eval fires at the numpy
-            # readback in _decode_faces. Splitting unet/vae_dec stages here
-            # misattributes ~all cost to vae_dec and reports ~0ms for unet
-            # (audit B4 profiler honesty). Use ONE "render" stage so the
-            # reported number is the true joint unet+decode cost.
-            pf.end()
-            pf.begin("render")
-            try:
-                dtype = self.pipe.dtype
-                img = gen(latent, mx.array(chunk[None]).astype(dtype))
-                face = self._decode_faces(img)[0]
-            except Exception as e:
-                log.warning("compiled render failed (%s); plain path", e)
-                self._compiled_generate = None
-                self._compiled_generate_128 = None
-                face = None
-            pf.end()
-        if face is None:
-            pred = _unet_forward(self.pipe, latent, chunk)
-            if config.DECODE_128 and latent.shape[-1] == config.LATENT:
-                pred = _pool2x(pred)
-            pf.end()
-            pf.begin("vae_dec")
-            face = self.pipe.decode_latents(pred)[0]
-            pf.end()
-        pf.begin("warp")
-        out = paste_back(frame, face, crop_bbox_to_xyxy(bbox), mask_provider=self._mask)
-        pf.end()
-        self._last_frame = out
-        return out
+            return self._bg_cache
 
-    def _apply_ddim_steps(self, steps: int) -> None:
-        # #927 landed: fusion-mlx MuseTalkPipeline.set_ddim_steps exists and
-        # sets the pipe's _ddim_steps state. NOTE: musetalk-mlx's realtime render
-        # path (_unet_forward / compiled closures) calls pipe._run_unet with
-        # steps=1 (single-step t=0) to hold the 33ms budget — multi-step DDIM
-        # (15/8) is Nx slower and breaks 30FPS. set_ddim_steps is therefore
-        # invoked here for observability + future offline multi-step paths, but
-        # the realtime hot loop stays single-step. The serious-tier compute
-        # lever for realtime is patch/bg-downscale/frame-reuse at critical,
-        # not step-cut.
-        setter = getattr(self.pipe, "set_ddim_steps", None)
-        if setter is not None:
-            setter(steps)
-            log.debug("ddim steps set to %d", steps)
-            return
-        if not getattr(self, "_ddim_unavailable_logged", False):
-            self._ddim_unavailable_logged = True
-            log.warning(
-                "set_ddim_steps unavailable on fusion-mlx pipe; serious-tier "
-                "step-cut is a no-op. Upgrade fusion-mlx >=0.10.3."
-            )
+    def _require_scheduler(self):
+        # Lazily bind a scheduler shell so reload()/barge-in unit-test shells
+        # built via __new__ keep setting _inflight directly (compat shim).
+        st = self.__dict__.get("_scheduler")
+        if st is None:
+            st = RenderScheduler.__new__(RenderScheduler)
+            self._scheduler = st
+        return st
 
-    def _decode_faces(self, img) -> np.ndarray:
-        # Compiled-joint path output: RGB float [0,1] (B,3,256,256) -> BGR
-        # uint8, same contract as pipe.decode_latents. Transpose + scale run
-        # in numpy: the MLX-side transpose/fp32 cast forced two extra GPU
-        # copies before a 2x-bytes readback for zero visual gain.
-        arr = np.array(img)
-        return ((arr.transpose(0, 2, 3, 1) * 255).round().astype(np.uint8))[..., ::-1]
+    @property
+    def _inflight(self):
+        return self._require_scheduler()._inflight
+
+    @_inflight.setter
+    def _inflight(self, v):
+        self._require_scheduler()._inflight = v
 
     def _setup_graph_pass(self) -> None:
         # FR-MLX-003: consume the fusion-mlx #911/#918 graph passes when
@@ -921,50 +741,3 @@ class MuseTalkSession:
 
     def _bg_frame(self, downscale: int = 1):
         return self._bg_store.get_frame(downscale)
-
-    def _setup_graph_pass(self) -> None:
-        # FR-MLX-003: consume the fusion-mlx #911/#918 graph passes when
-        # available: structural rewrite (Conv+GN+SiLU fusion) + SmartConv2d
-        # shape-dispatched conv (#919) on the module tree, then compile the
-        # joint UNet+VAE-decode forward (PE applied inside, mirroring
-        # generate_faces; generate_faces itself calls mx.eval, illegal under
-        # mx.compile). One graph for unet->decode is ~2x faster than two
-        # compiled calls (no compiled-input boundary).
-        self._compiled_generate = None
-        self._compiled_generate_128 = None
-        if not config.GRAPH_OPT:
-            log.info("graph pass disabled by config flag")
-            return
-        try:
-            from fusion_mlx.graph_opt import apply_patterns, apply_smart_conv, compile_with_custom_pass
-            from fusion_mlx.video.musetalk_mlx.config import UNET_TIMESTEP
-            from fusion_mlx.video.musetalk_mlx.whisper.audio2feature import apply_pe
-
-            n_pat = apply_patterns(self.pipe.unet) + apply_patterns(self.pipe.vae)
-            n_sc = 0
-            if config.SMART_CONV:
-                n_sc = apply_smart_conv(self.pipe.unet) + apply_smart_conv(self.pipe.vae)
-            log.info("graph passes: %d pattern rewrites, %d smart convs", n_pat, n_sc)
-            pipe = self.pipe
-
-            def render_fn(latent, audio):
-                pred = pipe.unet(latent, mx.array([UNET_TIMESTEP]), apply_pe(audio))
-                return mx.clip(pipe.vae.decode(pred / pipe.scaling_factor) / 2 + 0.5, 0, 1)
-
-            self._compiled_generate = compile_with_custom_pass(render_fn)
-            log.info("fusion-mlx graph pass applied to joint UNet+decode (#911/#918)")
-            if config.DECODE_128:
-
-                def render_fn_128(latent, audio):
-                    pred = pipe.unet(latent, mx.array([UNET_TIMESTEP]), apply_pe(audio))
-                    return mx.clip(pipe.vae.decode(_pool2x(pred) / pipe.scaling_factor) / 2 + 0.5, 0, 1)
-
-                self._compiled_generate_128 = compile_with_custom_pass(render_fn_128)
-                log.info("DECODE_128 joint graph compiled (latent 2x2 avg-pool before decode)")
-        except Exception as e:
-            # Clear BOTH compiled entries — a partial assignment (128 set before
-            # the main graph raised) would leave inconsistent state. Warning, not
-            # info: operators must see that graph optimization is off (audit P2-4).
-            self._compiled_generate = None
-            self._compiled_generate_128 = None
-            log.warning("graph pass unavailable (%s); plain generate_faces", e)
