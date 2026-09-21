@@ -18,13 +18,11 @@ def test_numpy_sink_copies_frame():
     assert sink.frames[0][0][0, 0, 0] == 7
 
 
-def test_zerocopy_sink_factory():
-    # fusion-mlx #913 bridge; one-copy fallback when the native ext is absent.
-    try:
-        sink = make_sink("zerocopy", width=64, height=48)
-    except Exception as e:
-        assert False, f"ZeroCopySink init failed: {e}"
-    assert sink.width == 64 and sink.height == 48
+def test_zerocopy_kind_falls_back_to_numpy():
+    # ZeroCopySink was removed (audit 0921 DC1: dead code, #913 bridge not on
+    # the Python production path). "zerocopy" now falls back to NumpyFrameSink.
+    sink = make_sink("zerocopy", width=64, height=48)
+    assert isinstance(sink, NumpyFrameSink)
     sink.emit(np.zeros((48, 64, 3), dtype=np.uint8), 0.5)
     assert sink.last_pts == 0.5
 

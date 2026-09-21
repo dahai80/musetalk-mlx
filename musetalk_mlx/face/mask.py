@@ -39,10 +39,21 @@ class MaskProvider:
         raise NotImplementedError
 
     def mouth_mask_cached_only(self, frame_bgr: np.ndarray, face_box):
-        return self.mouth_mask(frame_bgr, face_box)
+        # Base default must NOT delegate to mouth_mask — that would run the
+        # parse backend on whatever thread calls this (paste worker / render
+        # thread), contradicting the "cached_only = never a model call"
+        # contract. Subclasses override with a real cache-hit lookup; the base
+        # raises so a misconfigured provider fails loudly (audit 0921 DC3).
+        raise NotImplementedError
 
 
 class FeatherMask(MaskProvider):
+    # FeatherMask has no model call — mouth_mask is pure numpy/cv2, so the
+    # cached_only contract ("never a model call") is trivially satisfied by
+    # computing the feather mask directly (no cache needed).
+    def mouth_mask_cached_only(self, frame_bgr: np.ndarray, face_box):
+        return self.mouth_mask(frame_bgr, face_box)
+
     def mouth_mask(self, frame_bgr: np.ndarray, face_box):
         crop_box = _expand_crop_box(face_box, frame_bgr.shape)
         x_s, y_s, x_e, y_e = crop_box

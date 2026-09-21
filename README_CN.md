@@ -93,7 +93,7 @@ crop。bbox 数学、卡尔曼平滑、守卫与待机逻辑由 `tests/test_land
 ## 阶段状态
 
 - [x] Phase 1（部分）：神经核心已在 fusion-mlx v0.2.0；DWPose bbox 数学 + 卡尔曼 + 待机眨眼已接入；MLX DWPose 后端待 fusion-mlx #909
-- [x] Phase 2（业务层）：重叠音频滑窗（前缀平滑）、生产级融合贴回 + 可插拔 face-parse 掩码、零拷贝帧汇（拷贝兜底）、离线 Demo 打磨。embedding 级前缀缓存待 fusion-mlx #914；face-parse 模型待 #910；真零拷贝待 #913。
+- [x] Phase 2（业务层）：重叠音频滑窗（前缀平滑）、生产级融合贴回 + 可插拔 face-parse 掩码、单拷贝帧出站、离线 Demo 打磨。embedding 级前缀缓存待 fusion-mlx #914；face-parse 模型待 #910；真零拷贝待 #913（路线分叉，未接入 Python 生产路径）。
 - [x] Phase 3（业务层）：完整温控降级阶梯（FR-END-003）、ReloadModel 热重载（FR-MLX-006）、LiveKit 实时适配器（FR-LK-001/002，音频继承 PTS，双向音频）、实时运行 CLI。图优化 + ICB 性能待 fusion-mlx #911/#912。
 - [x] Phase 4（桩）：LCMFastSession 配置桩（默认关闭；主版本用多步 DDIM）。蒸馏训练不在本仓库范围。
 - [ ] 集成测试：神经核心已验证（7 个集成测试通过）；#915 修复已验证（权重严格加载 + mel 打包）；真实关键点唇形对齐被 fusion-mlx #917（DWPose 输出损坏）阻塞 — 见 `tests/integration/INTEGRATION_PENDING.md`。
@@ -139,10 +139,10 @@ fusion-mlx 服务器污染，已撤回；上表为干净 GPU 数字。
 
 - 对 PyTorch 的分层精度 parity 测试（`tests/parity/`）：Whisper 编码器、VAE encode（cosine ≥ 0.98）、VAE decode（PSNR ≥ 38dB）、8 通道 UNet（cosine ≥ 0.98）。fixture 在 torch 环境一次性生成（`musetalk_mlx/tools/gen_parity_fixtures.py`），测试时无 torch 依赖。
 - 单帧关键点丢失走 Kalman 预测（FR-END-006）：位置+速度外推，连续 5 帧丢失才进 idle-blink；含 bbox 合理性 + 离群点剔除守卫。
-- 温控降级阶梯全链路接入 session（FR-END-003）：砍步数 → 帧复用(3) → 背景降采样(2) → patch 256→128（绝不直接 256→128）。
+- 温控降级阶梯全链路接入 session（FR-END-003）：砍步数 → 帧复用(3) → 背景降采样(2) → patch 256→128（绝不直接 256→128）。**注（审计 0921 P1-7）：** serious 档砍步数（`set_ddim_steps` 15→8）在实时路径是 no-op——实时渲染循环固定单步 t=0 以守住 33ms 预算（多步 DDIM 慢 Nx 倍）。serious 档仅在离线多步路径生效。实时降级依赖 critical 档（帧复用 / 背景降采样 / patch-128）。
 - 底片帧预加载内存池（FR-END-002），保留流式兜底。
 - 通过 fusion-mlx `compile_with_custom_pass`（#911）消费图优化 Pass，探测式优雅降级。
-- 帧输出接 `MetalZeroCopyBridge.array_to_cvbuffer`（#913）零拷贝，保留拷贝兜底。
+- 单拷贝帧出站：`LiveKitAdapter.publish_frame` 每帧做一次 BGR→BGRA 拷贝。真正的 IOSurface/CVPixelBuffer 零拷贝经 fusion-mlx #913 `MetalZeroCopyBridge` 未接入 Python MLX 生产路径（路线分叉，审计 0921 §1）；死代码 `ZeroCopySink` 已删除（审计 0921 DC1）。
 - 分阶段 profiler（STFT/Whisper/UNet/VAE/warp/frame-out）、phys-footprint 内存采样、最大连续分配探测（`musetalk_mlx/utils/profiling.py`）。
 - 运维工具：`musetalk-mlx-benchmark`（FPS + 分阶段预算，PRD 9.5）、`musetalk-mlx-stress`（长会话泄漏 ≤ 50MB + 碎片探测）。
 - 边界输入测试：小于 10ms 音频、全静音、满幅削波。

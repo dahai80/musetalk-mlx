@@ -98,7 +98,7 @@ by `tests/test_landmarks.py` independent of the model.
 ## Phase status
 
 - [x] Phase 1 (partial): neural core in fusion-mlx v0.2.0; DWPose bbox math + Kalman + idle-blink wired; MLX DWPose backend pending fusion-mlx #909
-- [x] Phase 2 (business layer): overlapping audio windower (prefix-smoothing), production blend paste-back + pluggable face-parse mask, zero-copy frame sink (copy fallback), offline demo polish. Embedding-level prefix cache pending fusion-mlx #914; face-parse model pending #910; true zero-copy pending #913.
+- [x] Phase 2 (business layer): overlapping audio windower (prefix-smoothing), production blend paste-back + pluggable face-parse mask, one-copy frame egress, offline demo polish. Embedding-level prefix cache pending fusion-mlx #914; face-parse model pending #910; true zero-copy pending #913 (route divergence, not on the Python production path).
 - [x] Phase 3 (business layer): full thermal degradation ladder (FR-END-003), ReloadModel hot-reload (FR-MLX-006), LiveKit realtime adapter (FR-LK-001/002, audio-inherited PTS, bidirectional audio), realtime runner CLI. Graph pass + ICB perf pending fusion-mlx #911/#912.
 - [x] Phase 4 (stub): LCMFastSession config stub (disabled; main release uses multi-step DDIM). Distillation training out of scope.
 - [ ] Integration testing: neural core verified (7 integration tests green); #915 fix verified (strict weight load + mel packaging); real-landmark lip-sync parity blocked by fusion-mlx #917 (DWPose output corruption) — see `tests/integration/INTEGRATION_PENDING.md`.
@@ -150,10 +150,10 @@ server) and are retracted; the table above is clean-GPU.
 
 - Layered parity tests vs PyTorch (`tests/parity/`): Whisper encoder, VAE encode (cosine >= 0.98), VAE decode (PSNR >= 38dB), 8-ch UNet (cosine >= 0.98). One-time fixture generation in a torch env (`musetalk_mlx/tools/gen_parity_fixtures.py`); comparison at test time is torch-free.
 - Kalman PREDICTION on single-frame landmark miss (FR-END-006): pos+velocity propagation, idle-blink only after 5 consecutive misses; bbox-plausibility + outlier-rejection guards.
-- Full thermal ladder wiring in-session (FR-END-003): step-cut -> frame-reuse(3) -> bg-downscale(2) -> patch 256->128 (never a direct 256->128 jump).
+- Full thermal ladder wiring in-session (FR-END-003): step-cut -> frame-reuse(3) -> bg-downscale(2) -> patch 256->128 (never a direct 256->128 jump). **Note (audit 0921 P1-7):** the serious-tier step-cut (`set_ddim_steps` 15→8) is a no-op on the realtime path — the realtime render loop is fixed single-step t=0 to hold the 33ms budget (multi-step DDIM is Nx slower). Serious-tier only takes effect on the offline multi-step path. Realtime degradation relies on the critical tier (frame-reuse / bg-downscale / patch-128).
 - Base-video frame preload memory pool (FR-END-002) with streaming fallback.
 - Graph-pass consumption via fusion-mlx `compile_with_custom_pass` (#911), probe-based graceful fallback.
-- Zero-copy frame sink on `MetalZeroCopyBridge.array_to_cvbuffer` (#913) with copy fallback.
+- One-copy frame egress: `LiveKitAdapter.publish_frame` does one BGR→BGRA copy per frame. True IOSurface/CVPixelBuffer zero-copy via the fusion-mlx #913 `MetalZeroCopyBridge` is not wired into the Python MLX production path (route divergence, audit 0921 §1); the dead `ZeroCopySink` was removed (audit 0921 DC1).
 - Per-stage profiler (STFT/Whisper/UNet/VAE/warp/frame-out), phys-footprint memory sampling, max-contiguous-alloc probe (`musetalk_mlx/utils/profiling.py`).
 - Ops tooling: `musetalk-mlx-benchmark` (FPS + per-stage budgets, PRD 9.5) and `musetalk-mlx-stress` (long-session leak <= 50MB + fragmentation probe).
 - Edge-input tests: sub-10ms audio, all-silence, full-scale clipping.
