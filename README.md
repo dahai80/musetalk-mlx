@@ -98,7 +98,7 @@ by `tests/test_landmarks.py` independent of the model.
 
 - [x] Phase 1 (partial): neural core in fusion-mlx v0.2.0; DWPose bbox math + Kalman + idle-blink wired; MLX DWPose backend pending fusion-mlx #909
 - [x] Phase 2 (business layer): overlapping audio windower (prefix-smoothing), production blend paste-back + pluggable face-parse mask, zero-copy frame egress (memoryview handoff to livekit VideoFrame, FR-LK-001), offline demo polish. Embedding-level prefix cache pending fusion-mlx #914; face-parse model pending #910; native IOSurface→CVPixelBuffer direct-encoding pending #913 (livekit Python SDK does not accept CVPixelBuffer today; bridge wired for non-LiveKit sinks).
-- [x] Phase 3 (business layer): full thermal degradation ladder (FR-END-003), ReloadModel hot-reload (FR-MLX-006), LiveKit realtime adapter (FR-LK-001/002, audio-inherited PTS, bidirectional audio), realtime runner CLI. Graph pass + ICB perf pending fusion-mlx #911/#912.
+- [x] Phase 3 (business layer): full thermal degradation ladder (FR-END-003), ReloadModel hot-reload (FR-MLX-006), LiveKit realtime adapter (FR-LK-001/002, audio-inherited PTS, bidirectional audio), realtime runner CLI. Graph pass fusion-mlx #921/#924/#932 closed (module-level ResnetBlock2D fusion + MSL Conv+GN+SiLU kernel landed, default ON); ICB (#912) remains an upstream open item (not consumed by the Python/MLX path — route divergence).
 - [x] Phase 4 (LCM): N/A in the MLX architecture. The fusion-mlx pipe is inherently single-step t=0, so there is no multi-step DDIM loop to distill into a 1-step fast path — LCM distillation is a no-op here. The prior `LCMFastSession` stub + `MT_LCM_ENABLED` flag instantiated a dead object never called from the render hot path, implying a fast path that does not exist; both removed for honesty. If fusion-mlx ships a distilled-weights API, reintroduce a real fast path (not a stub).
 - [x] Integration testing: neural core verified (8 integration tests green in `tests/integration/`); #915 fix verified (strict weight load + mel packaging); #916/#917 fixed in fusion-mlx v0.10.2 — real-landmark path green (10/10 detections, sane bbox, `_FrameSpaceDWPose` workaround removed); offline E2E runs clean (150-frame video, real landmarks, no guard fallback); A3 LiveKit realtime verified (29.82 FPS, RTT 33.3ms, PTS monotonic); A4 2h stress running. Remaining gate: offline PSNR ≥ 38dB / SSIM ≥ 0.95 vs MuseTalk torch reference — `gen_gt.py` tool exists (subprocess into MuseTalk checkout, MPS), not yet run against the torch GT. See `tests/integration/INTEGRATION_PENDING.md`.
 
@@ -145,12 +145,13 @@ v1.9.1, `lk_receive.py` probe):
 
 The live-to-ceiling gap was closed by the render-thread + async publish +
 zero-copy architecture (A3): the prior ~19ms/frame gap was paste + readback +
-publish GIL contention serialized on the pacer thread. **The 30 FPS lever
-remains the VAE decoder** at full 256² quality (decode ~25ms/frame of the
-round, dominated by the 3-upsample conv stack); Conv+GroupNorm+SiLU MSL fusion
-(fusion-mlx #924) is the path to clear 30 FPS at full quality.
-`DECODE_128` + the A3 architecture already clears 30 FPS at 128² (29.82 FPS
-measured).
+publish GIL contention serialized on the pacer thread. The VAE decoder
+full-quality gap (#921/#924/#932 — conv2d fp16 cliffs + MSL Conv+GN+SiLU
+fusion + module-level graph patterns) is now closed in fusion-mlx; the A3
+LiveKit E2E measured 29.82 FPS at 128² with `DECODE_128=1`. Full 256² quality
+30 FPS requires the fused MSL kernel to be re-benchmarked on a clean GPU with
+the latest fusion-mlx (the 19.4 FPS full-decode figure predates the #921/#924
+fixes).
 
 The earlier "58ms decode / 8 FPS sustained" and "24.4 FPS live" figures were
 contention-contaminated (linguakids watchdog auto-restarting the fusion-mlx
@@ -191,11 +192,11 @@ server) and are retracted; the A3 LiveKit E2E table above is clean-GPU.
 | [#918](https://github.com/dahai80/fusion-mlx/issues/918) | `compile_with_custom_pass` is a no-op stub (patterns never applied) — **fixed v0.10.3, 0 matches on musetalk topology** | 3 |
 | [#919](https://github.com/dahai80/fusion-mlx/issues/919) | Metal conv2d fp16 throughput cliffs up to 8x between shapes — **fixed v0.10.3; SmartConv2d correct but 1.5x slower in-graph, gated off** | 3 |
 | [#920](https://github.com/dahai80/fusion-mlx/issues/920) | Default allocator cache grows unbounded, multi-second render spikes — **fixed v0.10.3** | 3 |
-| [#921](https://github.com/dahai80/fusion-mlx/issues/921) | Metal conv2d fp16 kernel cliffs — sole remaining 30FPS blocker (decode 58ms -> ~20ms needed) | 3 |
-| [#924](https://github.com/dahai80/fusion-mlx/issues/924) | MSL fused Conv+GN+SiLU kernel — open, blocks 30FPS (decode ~45ms -> ~20ms) | 3 |
+| [#921](https://github.com/dahai80/fusion-mlx/issues/921) | Metal conv2d fp16 kernel cliffs — **closed**: MuseTalk realtime loop reaches 30 FPS GPU-side | 3 |
+| [#924](https://github.com/dahai80/fusion-mlx/issues/924) | MSL fused Conv+GN+SiLU kernel — **closed**: `fusion_mlx/custom_kernels/fused_conv_gn_silu.py` landed (conv_stats + gn_affine_silu kernels) | 3 |
 | [#927](https://github.com/dahai80/fusion-mlx/issues/927) | `set_ddim_steps` runtime DDIM step-count setter — **closed v0.10.5**: `pipe.set_ddim_steps(n)` sets the pipe's `_ddim_steps` state; `_run_unet(steps=None)` consumes it. musetalk-mlx's realtime hot loop stays single-step (steps=1, t=0) to hold the 33ms budget; the serious-tier step-cut (15→8) takes effect on the offline multi-step path via `_apply_ddim_steps` | 3 |
 | [#928](https://github.com/dahai80/fusion-mlx/issues/928) | Public API contract — musetalk-mlx reaches into private attrs (`_dtype`/`UNET_TIMESTEP`/`apply_pe`/`unet`); version lock is a fallback, not a contract — **closed v0.10.5, migrated to `pipe.dtype`/`pipe._run_unet`** | 3 |
-| [#932](https://github.com/dahai80/fusion-mlx/issues/932) | `apply_patterns` matches 0 modules on MuseTalk UNet/VAE — pattern matcher blind to code-level GN→SiLU→Conv call sequences; sole remaining 30FPS blocker (render_eval 108ms/round, need 66ms) | 3 |
+| [#932](https://github.com/dahai80/fusion-mlx/issues/932) | `apply_patterns` module-level graph fusion — **closed**: whole-block ResnetBlock2D fusion (GN→SiLU→Conv pairs), default ON (`FUSION_MUSETALK_GRAPH_PATTERNS=1`), runs before SmartConv2d wrapping | 3 |
 
 ## Operations runbook
 

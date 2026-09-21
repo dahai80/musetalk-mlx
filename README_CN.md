@@ -93,7 +93,7 @@ crop。bbox 数学、卡尔曼平滑、守卫与待机逻辑由 `tests/test_land
 
 - [x] Phase 1（部分）：神经核心已在 fusion-mlx v0.2.0；DWPose bbox 数学 + 卡尔曼 + 待机眨眼已接入；MLX DWPose 后端待 fusion-mlx #909
 - [x] Phase 2（业务层）：重叠音频滑窗（前缀平滑）、生产级融合贴回 + 可插拔 face-parse 掩码、零拷贝帧出站（memoryview 直交 livekit VideoFrame，FR-LK-001）、离线 Demo 打磨。embedding 级前缀缓存待 fusion-mlx #914；face-parse 模型待 #910；native IOSurface→CVPixelBuffer 直编待 #913（livekit Python SDK 当前不直接接受 CVPixelBuffer；桥已接入非 LiveKit sink）。
-- [x] Phase 3（业务层）：完整温控降级阶梯（FR-END-003）、ReloadModel 热重载（FR-MLX-006）、LiveKit 实时适配器（FR-LK-001/002，音频继承 PTS，双向音频）、实时运行 CLI。图优化 + ICB 性能待 fusion-mlx #911/#912。
+- [x] Phase 3（业务层）：完整温控降级阶梯（FR-END-003）、ReloadModel 热重载（FR-MLX-006）、LiveKit 实时适配器（FR-LK-001/002，音频继承 PTS，双向音频）、实时运行 CLI。图优化 fusion-mlx #921/#924/#932 已闭（模块级 ResnetBlock2D 熔合 + MSL Conv+GN+SiLU 内核落地，默认开）；ICB（#912）仍为上游 open 项（Python/MLX 路径未消费 — 路线分叉）。
 - [x] Phase 4（LCM）：MLX 架构下不适用。fusion-mlx pipe 本身就是 single-step t=0，没有多步 DDIM 可蒸馏成 1-step fast path——LCM 蒸馏在此是同义反复。先前的 `LCMFastSession` 桩 + `MT_LCM_ENABLED` flag 实例化了一个渲染热路径从不调用的死对象，暗示存在不存在的 fast path；两者已删，诚实处理。若 fusion-mlx 未来发布蒸馏权重 API，应重新引入真实 fast path（非桩）。
 - [x] 集成测试：神经核心已验证（`tests/integration/` 8 个集成测试通过）；#915 修复已验证（权重严格加载 + mel 打包）；#916/#917 已在 fusion-mlx v0.10.2 修复——真实关键点链路全绿（10/10 检出、bbox 合理、`_FrameSpaceDWPose` workaround 已移除）；离线 E2E 跑通（150 帧视频、真实关键点、无 guard 兜底）；A3 LiveKit 实时已实测（29.82 FPS、RTT 33.3ms、PTS 单调）；A4 2h 压测在跑。剩余门禁：离线 PSNR ≥ 38dB / SSIM ≥ 0.95 对比 MuseTalk torch 参照——`gen_gt.py` 工具存在（subprocess 进 MuseTalk checkout，MPS），尚未跑 torch GT。见 `tests/integration/INTEGRATION_PENDING.md`。
 
@@ -136,10 +136,11 @@ LiveKit E2E（A3，干净 GPU，1080p，`MT_DECODE_128=1`，本地 LiveKit serve
 | PTS | 严格单调 |
 
 实测到上限的 gap 已由「渲染线程 + 异步 publish + 零拷贝」架构（A3）闭合：旧 ~19ms/帧 gap
-是 paste + readback + publish GIL 争用在 pacer 线程串行。**30 FPS 的杠杆仍是 VAE decoder**
-（完整 256² 质量下 decode ~25ms/帧，主要来自 3 个 upsample 卷积栈）；Conv+GroupNorm+SiLU
-MSL 熔合内核（fusion-mlx #924）是完整质量下达成 30 FPS 的路径。`DECODE_128` + A3 架构
-在 128² 下已达成 30 FPS（实测 29.82 FPS）。
+是 paste + readback + publish GIL 争用在 pacer 线程串行。VAE decoder 完整质量 gap
+（#921/#924/#932 — conv2d fp16 悬崖 + MSL Conv+GN+SiLU 熔合 + 模块级图 patterns）已在
+fusion-mlx 闭合；A3 LiveKit E2E 在 `DECODE_128=1` 下实测 29.82 FPS（128²）。完整 256²
+质量 30 FPS 需在干净 GPU 上用最新 fusion-mlx 重测熔合 MSL 内核（19.4 FPS full-decode 数字
+早于 #921/#924 修复）。
 
 早期「58ms decode / 8 FPS 持续」「24.4 FPS 实测」数据被 linguakids watchdog 自动重启
 fusion-mlx 服务器污染，已撤回；上表 A3 LiveKit E2E 为干净 GPU 数字。
@@ -179,11 +180,11 @@ fusion-mlx 服务器污染，已撤回；上表 A3 LiveKit E2E 为干净 GPU 数
 | [#918](https://github.com/dahai80/fusion-mlx/issues/918) | `compile_with_custom_pass` 是空壳 — **v0.10.3 已修；musetalk 拓扑匹配 0 处** | 3 |
 | [#919](https://github.com/dahai80/fusion-mlx/issues/919) | Metal conv2d fp16 吞吐悬崖 — **v0.10.3 已修；SmartConv2d 数值正确但图内慢 1.5×，默认关** | 3 |
 | [#920](https://github.com/dahai80/fusion-mlx/issues/920) | 默认 allocator cache 无界增长 — **v0.10.3 已修** | 3 |
-| [#921](https://github.com/dahai80/fusion-mlx/issues/921) | Metal conv2d fp16 kernel 悬崖 — 30FPS 最后阻塞项（decode 58ms 需降到 ~20ms） | 3 |
-| [#924](https://github.com/dahai80/fusion-mlx/issues/924) | MSL fused Conv+GN+SiLU kernel — open，阻塞 30FPS（decode ~45ms 需降到 ~20ms） | 3 |
+| [#921](https://github.com/dahai80/fusion-mlx/issues/921) | Metal conv2d fp16 kernel 悬崖 — **已闭**：MuseTalk 实时循环 GPU 侧达 30 FPS | 3 |
+| [#924](https://github.com/dahai80/fusion-mlx/issues/924) | MSL fused Conv+GN+SiLU kernel — **已闭**：`fusion_mlx/custom_kernels/fused_conv_gn_silu.py` 落地（conv_stats + gn_affine_silu 内核） | 3 |
 | [#927](https://github.com/dahai80/fusion-mlx/issues/927) | `set_ddim_steps` 运行时 DDIM 步数 setter — **v0.10.5 已闭**：`pipe.set_ddim_steps(n)` 设 pipe 的 `_ddim_steps` 状态；`_run_unet(steps=None)` 消费它。musetalk-mlx 实时热循环保持单步（steps=1, t=0）以守 33ms 预算；serious 档步削（15→8）在离线多步路径经 `_apply_ddim_steps` 生效 | 3 |
 | [#928](https://github.com/dahai80/fusion-mlx/issues/928) | 公共 API 契约 — musetalk-mlx 访问私有属性（`_dtype`/`UNET_TIMESTEP`/`apply_pe`/`unet`）；版本锁是兜底非契约 — **v0.10.5 已闭，迁移到 `pipe.dtype`/`pipe._run_unet`** | 3 |
-| [#932](https://github.com/dahai80/fusion-mlx/issues/932) | `apply_patterns` 在 MuseTalk UNet/VAE 上 0 匹配 — pattern matcher 看不到代码级 GN→SiLU→Conv 调用序列；30FPS 最后阻塞项（render_eval 108ms/round，需 66ms） | 3 |
+| [#932](https://github.com/dahai80/fusion-mlx/issues/932) | `apply_patterns` 模块级图熔合 — **已闭**：整块 ResnetBlock2D 熔合（GN→SiLU→Conv 对），默认开（`FUSION_MUSETALK_GRAPH_PATTERNS=1`），在 SmartConv2d 包装前运行 | 3 |
 
 ## 运维 runbook
 
