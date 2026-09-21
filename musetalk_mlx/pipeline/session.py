@@ -258,6 +258,35 @@ class MuseTalkSession:
         # (no black screen). Returns True on success.
         wd = weights_dir or self._weights_dir
         md = mlx_dir if mlx_dir is not None else self._mlx_dir
+        # Fast path: same weights + same mlx-dir = state-only reset (no pipe
+        # rebuild). A full from_pretrained reloads 3GB weights and recompiles
+        # graphs (~10s stall + mlx_active doubles to 6GB, breaking the 4GB
+        # budget). For same-version hot-reload (the A4 stress scenario and the
+        # common "reset drift" operator action), only the runtime queues /
+        # prefix / thermal state need resetting — the pipe and bg cache stay.
+        # A weights change falls through to the full rebuild below.
+        same = wd == self._weights_dir and md == self._mlx_dir
+        if same and getattr(self, "pipe", None) is not None:
+            log.info("ReloadModel: same weights; state-only reset (no pipe rebuild)")
+            rl = getattr(self, "_render_lock", None)
+            if rl is not None:
+                rl.acquire()
+            # Keep _pending: same-weight encoded chunks are still valid, so the
+            # render thread resumes immediately instead of waiting 5s for the
+            # windower to re-buffer a full hop (A4: resume 10s -> <1s). Only
+            # inflight (lazy graphs tied to a compile generation) and emitted
+            # frames are stale.
+            self._inflight = deque()
+            self._drain_paste_queue()
+            with self._emit_lock:
+                self._out_q.clear()
+                self._expected_pts = None
+            self._audio_prefix = None
+            self._thermal = ThermalController()
+            if rl is not None:
+                rl.release()
+            self._render_ev_set()
+            return True
         log.info("ReloadModel: draining %d pending chunks, rebuilding pipe", len(self._pending))
         # Serialize against the render thread (producer) so no round is
         # mid-flight against the old pipe while the swap happens.
@@ -292,26 +321,33 @@ class MuseTalkSession:
         # every bg frame, breaking the 4GB budget.
         old, self.pipe = self.pipe, new_pipe
         self.lcm = LCMFastSession(new_pipe) if config.LCM_ENABLED else None
+        # Drop compiled closures BEFORE clearing the old pipe ref: a compiled
+        # graph captures the old pipe in its closure, so without this the old
+        # 1-2GB weights stayed alive alongside the new pipe (A4 finding:
+        # mlx_active 2006->5416MB across 3 reloads, breaking the 4GB budget).
+        # _set_render_cache rebuilds them lazily on the next render.
+        self._clear_compiled_gens()
         self._setup_graph_pass()
         old = None  # noqa: F841 - drop the last strong ref before clear_cache
         mx.clear_cache()
         if config.FP16 and hasattr(self.pipe, "astype"):
             new_pipe.astype(mx.float16)
-        # cached latents belong to the old pipe dtype/weights; must rebuild.
-        # The prior `if getattr(self, "_bg_pool", None)` was FALSY for an empty
-        # pool ([]) — it cleared _bg_cache and never rebuilt, dropping the
-        # session to the slow live DWPose+encode path (~150ms/frame, ~6fps)
-        # permanently after reload (audit A8). Rebuild whenever a pool exists
-        # (even empty); only skip when there is genuinely no pool attr.
+        # BG cache: the old cache's landmarks/bbox (DWPose, weight-independent)
+        # and latents (sd-vae-ft-mse, unchanged across same-version reloads)
+        # stay valid — astype(pipe.dtype) in _render handles a dtype shift. Keep
+        # the old cache so the render thread resumes immediately (<2s, A4
+        # requirement) instead of waiting 24s for synchronous precompute. A
+        # background thread rebuilds against the new pipe and atomically swaps
+        # when done; until then the live path handles any None entries.
         pool = getattr(self, "_bg_pool", None)
         if pool is not None:
-            # Rebuild synchronously — _precompute_cache runs DWPose+VAE encode
-            # per frame, which is slow, but an async rebuild races the render
-            # thread on _bg_cache (R8) and on _tracker state (E4). Reload is an
-            # explicit operator action; a bounded stall is acceptable, a
-            # silent race is not. The live path in _render handles cache misses
-            # (None entries) until the rebuild completes.
-            self._precompute_cache(pool)
+            self._bg_rebuild_thread = threading.Thread(
+                target=self._bg_store.precompute_cache,
+                args=(pool, self._tracker, self._cropper, self.pipe),
+                name="bg-reload",
+                daemon=True,
+            )
+            self._bg_rebuild_thread.start()
         else:
             with self._bg_cache_lock:
                 self._bg_cache = []

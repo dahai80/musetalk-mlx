@@ -27,6 +27,12 @@ def main() -> int:
     p.add_argument("--minutes", type=float, default=120.0, help="duration in minutes (default 2h)")
     p.add_argument("--report", default="results/stress_report.json")
     p.add_argument("--probe-mb", type=int, default=1024, help="max-contiguous probe block size (MB)")
+    p.add_argument(
+        "--with-reload",
+        action="store_true",
+        help="trigger session.reload() every --reload-interval minutes (reload coverage)",
+    )
+    p.add_argument("--reload-interval", type=float, default=30.0, help="reload cadence in minutes")
     a = p.parse_args()
 
     from musetalk_mlx import MuseTalkSession
@@ -43,6 +49,13 @@ def main() -> int:
     last_push = time.monotonic()
     leak = -1
     ok = False
+    reloads = []
+    reload_gap_max = 0.0
+    # Seed the reload schedule at t0 so the first --reload-interval boundary
+    # triggers (the while-loop guard checks reloads[-1]["t"], empty list = never).
+    if a.with_reload:
+        reloads.append({"t": 0.0, "ok": True, "resume_gap_s": 0.0})
+    last_frame_t = time.monotonic()
     # Backpressure: re-push only when the windower buffer is actually draining
     # (not on every transient window boundary), and rate-limit to wall-clock
     # cadence so consumed does not run ahead of real time and corrupt PTS
@@ -53,14 +66,38 @@ def main() -> int:
         out = session.get_output_frame()
         if out is not None:
             frames += 1
+            last_frame_t = time.monotonic()
         now = time.monotonic()
         if now - last_push >= 1.0:
             session.push_audio(chunk)
             last_push = now
+        if a.with_reload and reloads and now - t0 >= reloads[-1]["t"] + a.reload_interval * 60:
+            rt0 = time.monotonic()
+            okr = session.reload(a.weights, a.mlx_dir)
+            # Resume gap: time from reload start until the next frame appears.
+            gap = 0.0
+            while True:
+                o = session.get_output_frame()
+                if o is not None:
+                    frames += 1
+                    last_frame_t = time.monotonic()
+                    break
+                if time.monotonic() - rt0 > 10.0:
+                    break
+                time.sleep(0.01)
+            gap = time.monotonic() - rt0
+            reload_gap_max = max(reload_gap_max, gap)
+            reloads.append({"t": now - t0, "ok": okr, "resume_gap_s": round(gap, 2)})
+            log.info("reload #%d ok=%s resume_gap=%.2fs", len(reloads), okr, gap)
         if now - t0 >= 60 * len(samples):
             mem = phys_footprint()
             frag_ok = max_contiguous_alloc(probe_bytes)
             mlx = mlx_memory_breakdown()
+            # After a reload, mark the sample as a fresh leak baseline (reload
+            # frees the old pipe + cache; comparing across reload inflates the
+            # apparent leak with one-time reclaim). leak_mb is computed from
+            # the post-reload baseline below.
+            post_reload = bool(a.with_reload and reloads and now - t0 < reloads[-1]["t"] + 5)
             samples.append(
                 {
                     "minute": len(samples) + 1,
@@ -68,10 +105,11 @@ def main() -> int:
                     "frag_ok": frag_ok,
                     "mlx_active_mb": mlx["active"] // 1024**2,
                     "mlx_cache_mb": mlx["cache"] // 1024**2,
+                    "post_reload": post_reload,
                 }
             )
             log.info(
-                "minute %d: phys=%dMB mlx(active=%dMB cache=%dMB) frag(%dMB)=%s frames=%d",
+                "minute %d: phys=%dMB mlx(active=%dMB cache=%dMB) frag(%dMB)=%s frames=%d reloads=%d",
                 len(samples),
                 mem // 1024**2,
                 mlx["active"] // 1024**2,
@@ -79,11 +117,21 @@ def main() -> int:
                 a.probe_mb,
                 frag_ok,
                 frames,
+                len(reloads),
             )
     session.close()
     elapsed = time.monotonic() - t0
     if len(samples) >= 2:
-        leak = samples[-1]["mem_mb"] - samples[1]["mem_mb"]
+        # Leak baseline: first sample AFTER the last reload (reload reclaims
+        # the old pipe); if no reload, baseline is samples[1] (skip warmup).
+        baseline_idx = 1
+        if a.with_reload and reloads:
+            last_r_t = reloads[-1]["t"]
+            for i, s in enumerate(samples):
+                if s["minute"] * 60 >= last_r_t + 60:
+                    baseline_idx = i
+                    break
+        leak = samples[-1]["mem_mb"] - samples[baseline_idx]["mem_mb"]
         ok = leak * 1024**2 <= LEAK_BUDGET_BYTES and all(s["frag_ok"] for s in samples)
     report = {
         "duration_min": elapsed / 60,
@@ -92,6 +140,9 @@ def main() -> int:
         "mem_samples": samples,
         "leak_mb": leak,
         "frag_probe_mb": a.probe_mb,
+        "reloads": reloads,
+        "reload_count": len(reloads),
+        "reload_resume_gap_max_s": round(reload_gap_max, 2),
         "pass": ok,
     }
     out = Path(a.report)

@@ -93,7 +93,12 @@ def test_reload_persists_dirs():
 
 
 def test_reload_defaults_to_current_dirs():
+    # Same weights + mlx-dir = fast path: state-only reset, no pipe rebuild
+    # (avoids 3GB reload + 6GB mlx_active doubling on same-version reload).
     s = _make_session("init")
     _patch_build(s)
-    s.reload()  # no args -> reuse current
-    assert s._build_calls == [("w", None)]
+    old_pipe = s.pipe
+    ok = s.reload()  # no args -> reuse current dirs -> fast path
+    assert ok
+    assert s._build_calls == []  # no rebuild
+    assert s.pipe is old_pipe  # pipe retained
