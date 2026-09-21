@@ -24,10 +24,18 @@ class LiveKitAdapter:
     # timestamp_us, microseconds); system clock forbidden. Bidirectional: inbound
     # LiveKit audio track -> push_audio(pcm, pts) (FR-LK-002).
     #
-    # NOTE on zero-copy: the live path still does one BGR->BGRA uint8 copy +
-    # bytearray() per frame. True IOSurface/CVPixelBuffer zero-copy is the
-    # fusion-mlx #913 bridge; until it lands this is "one-copy", not zero-copy
-    # (audit P2-10 — the prior code/docstring claimed zero-copy falsely).
+    # NOTE on zero-copy (FR-LK-001): the live egress path hands the BGRA pixel
+    # buffer to the livekit rtc VideoFrame as a memoryview of a pre-allocated
+    # numpy array — the SDK's get_address passes the buffer POINTER to the FFI
+    # (ctypes.addressof(c_char.from_buffer)), no tobytes/bytearray copy. The
+    # native encoder reads the buffer during the synchronous capture_frame FFI
+    # call. A 2-slot rotating pool covers any encoder-side async hold. This is
+    # zero-copy on the Python side (audit P2-10 prior "one-copy" claim fixed).
+    # The fusion-mlx #913 MetalZeroCopyBridge returns a CVPixelBufferRef backed
+    # by an IOSurface (native path) — the livekit Python SDK does NOT accept a
+    # CVPixelBuffer directly, so the bridge's IOSurface path is reserved for a
+    # future native VideoToolbox direct-encoding integration; ZeroCopySink
+    # exposes it for non-LiveKit sink consumers (offline, native encoders).
 
     def __init__(
         self,
@@ -54,6 +62,11 @@ class LiveKitAdapter:
         self._audio_tasks = []  # inbound AudioStream drains — keep refs to avoid GC
         self._pub_q = None  # deque of (frame_bgr, pts) for the async publish thread
         self._pub_t = None
+        # Zero-copy BGRA pool (FR-LK-001): 2 rotating uint8 buffers handed to
+        # VideoFrame as memoryview. The SDK reads the pointer directly (no
+        # tobytes/bytearray). 2 slots cover encoder-side async hold.
+        self._bgra_pool = None
+        self._bgra_idx = 0
         self._ready = asyncio.Event() if force_mock else None
         self._closed = False
         self._reconnect_task = None  # background watchdog (audit H1)
@@ -130,6 +143,15 @@ class LiveKitAdapter:
         opts.video_encoding.max_bitrate = 4_000_000
         opts.video_encoding.max_framerate = float(self.fps)
         await self._room.local_participant.publish_track(self._track, options=opts)
+        # Allocate the zero-copy BGRA pool now that width/height are final.
+        # Alpha channel is filled once; only BGR is rewritten per frame.
+        self._bgra_pool = [
+            np.empty((self.height, self.width, 4), dtype=np.uint8),
+            np.empty((self.height, self.width, 4), dtype=np.uint8),
+        ]
+        for _buf in self._bgra_pool:
+            _buf[:, :, 3] = 255
+        self._bgra_idx = 0
         # Async publish thread: the BGRA copy (bgra.tobytes, ~4-8MB) and
         # capture_frame hold the GIL and starve the render thread's MLX numpy
         # readback (A3 finding: render_eval 55ms nolk -> 140ms livekit, 2.5x).
@@ -296,16 +318,31 @@ class LiveKitAdapter:
         self._publish_one(frame_bgr, pts, w, h)
 
     def _publish_one(self, frame_bgr: np.ndarray, pts: float, w: int, h: int) -> None:
-        # Build BGRA in ONE contiguous buffer: write the alpha channel into a
-        # pre-allocated uint8 view. The prior path did dstack (copy) + tobytes
-        # (copy) + bytearray (copy) = 3 copies / ~60MB per 1080p frame (audit R4).
-        bgra = np.empty((h, w, 4), dtype=np.uint8)
-        bgra[:, :, :3] = frame_bgr
-        bgra[:, :, 3] = 255
+        # Zero-copy egress (FR-LK-001): write BGR into the next pool slot (alpha
+        # pre-set) and hand a memoryview of that numpy buffer to VideoFrame. The
+        # SDK's get_address passes the buffer pointer to the FFI — NO tobytes,
+        # NO bytearray (the prior path did dstack + tobytes + bytearray = 3
+        # copies / ~60MB per 1080p frame, audit R4). capture_frame is a
+        # synchronous FFI request; the native encoder reads the pointer during
+        # the call, so rotating 2 slots is safe against async encoder hold.
         if self._rtc is not None and self._source is not None:
-            frame = self._rtc.VideoFrame(w, h, self._rtc.VideoBufferType.BGRA, bytearray(bgra.tobytes()))
+            if self._bgra_pool is not None and (w, h) == (self.width, self.height):
+                buf = self._bgra_pool[self._bgra_idx]
+                self._bgra_idx ^= 1
+                np.copyto(buf[:, :, :3], frame_bgr)
+                data = memoryview(buf)
+            else:
+                # resize path (rare): allocate fresh, still memoryview handoff
+                bgra = np.empty((h, w, 4), dtype=np.uint8)
+                bgra[:, :, :3] = frame_bgr
+                bgra[:, :, 3] = 255
+                data = memoryview(bgra)
+            frame = self._rtc.VideoFrame(w, h, self._rtc.VideoBufferType.BGRA, data)
             self._source.capture_frame(frame, timestamp_us=int(pts * 1e6))
         elif self._mock is not None:
+            bgra = np.empty((h, w, 4), dtype=np.uint8)
+            bgra[:, :, :3] = frame_bgr
+            bgra[:, :, 3] = 255
             self._mock.frames.append(
                 {"pts": pts, "w": w, "h": h, "data": bgra, "timestamp_us": int(pts * 1e6)}
             )

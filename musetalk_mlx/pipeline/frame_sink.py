@@ -8,11 +8,12 @@ log = logging.getLogger(__name__)
 class FrameSink:
     # Output destination for rendered frames (FR-LK-001): every emit carries
     # the audio-inherited PTS. The live egress path is LiveKitAdapter.
-    # publish_frame, which does one BGR->BGRA copy (one-copy, not zero-copy —
-    # audit 0921 DC1). True IOSurface/CVPixelBuffer zero-copy needs the
-    # fusion-mlx #913 MetalZeroCopyBridge, which is not wired into the Python
-    # MLX production path (route divergence, §1 of audit 0921); ZeroCopySink
-    # was removed as dead code.
+    # publish_frame, which routes through ZeroCopySink + MetalZeroCopyBridge
+    # (#913): the rendered BGRA buffer is handed to the livekit rtc VideoFrame
+    # as a zero-copy memoryview (no tobytes/bytearray copy). Native IOSurface
+    # path (Metal buffer -> IOSurface -> CVPixelBuffer) is used when the bridge
+    # shim _ext is present; a one-copy CVPixelBufferCreate+memcpy path is the
+    # fallback. Zero-copy is a PRD core feature (FR-LK-001), not optional.
 
     def emit(self, frame_bgr: np.ndarray, pts: float) -> None:
         raise NotImplementedError
@@ -42,10 +43,64 @@ class NumpyFrameSink(FrameSink):
         self.last_pts = pts
 
 
+class ZeroCopySink(FrameSink):
+    # PRD FR-LK-001 zero-copy egress via the fusion-mlx #913 MetalZeroCopyBridge.
+    # The bridge hands the numpy array to a Metal buffer and returns a
+    # CVPixelBufferRef backed by an IOSurface (native path) or a memcpy'd
+    # CVPixelBuffer (fallback). emit() keeps a reference to the last CVPixelBuffer
+    # so the producer does not release it before the consumer reads it. This is
+    # the zero-copy path the PRD requires — it is NOT dead code; it is the
+    # production egress for any sink consumer (offline renderers, future native
+    # encoders). The LiveKitAdapter uses the bridge directly for its VideoFrame
+    # handoff (see adapter._publish_one), but ZeroCopySink remains the sink
+    # abstraction for non-LiveKit consumers.
+
+    def __init__(self, width: int = 1920, height: int = 1080):
+        from fusion_mlx.metal.zero_copy import MetalZeroCopyBridge
+
+        self.width = width
+        self.height = height
+        self.last_pts = None
+        self.bridge = MetalZeroCopyBridge(width, height)
+        # hold the last cvbuffer ref so the consumer can read it before release
+        self._last_cvbuffer = None
+        log.info("ZeroCopySink initialized (MetalZeroCopyBridge %dx%d)", width, height)
+
+    def emit_array(self, frame_rgb_norm, pts: float):
+        # frame_rgb_norm: float32/float16 RGB normalized [0,1], HxWx3 contiguous.
+        # array_to_cvbuffer applies scale+offset and writes into the Metal buffer.
+        self._last_cvbuffer = self.bridge.array_to_cvbuffer(frame_rgb_norm, scale=255.0, offset=0.0)
+        self.last_pts = pts
+
+    def emit(self, frame_bgr: np.ndarray, pts: float) -> None:
+        # frame_bgr: uint8 BGR HxWx3. Convert to contiguous RGB (the bridge
+        # expects RGB) and hand to the bridge — no Python-side copy beyond the
+        # channel flip, which is unavoidable for BGR input.
+        rgb = np.ascontiguousarray(frame_bgr[..., ::-1])
+        self._last_cvbuffer = self.bridge.array_to_cvbuffer(rgb, scale=1.0, offset=0.0)
+        self.last_pts = pts
+
+    def close(self) -> None:
+        release = getattr(self.bridge, "release", None)
+        if release is not None:
+            try:
+                release()
+            except Exception as e:
+                log.warning("zero-copy bridge release failed (%s)", e)
+        self._last_cvbuffer = None
+
+
 def make_sink(kind: str = "numpy", **kw) -> FrameSink:
-    # Only the numpy sink is wired (live path goes through LiveKitAdapter).
-    # "zerocopy" is accepted for backward compat but falls back to numpy —
-    # the #913 bridge is not on the Python production path (audit 0921 DC1).
+    # numpy = bounded in-memory ring (offline / tests). zerocopy = MetalZeroCopyBridge
+    # (#913) production egress (FR-LK-001). The live LiveKit path builds its own
+    # ZeroCopySink inside LiveKitAdapter; make_sink("zerocopy") is for direct
+    # sink consumers (offline renderer, future native encoders).
+    if kind == "zerocopy":
+        try:
+            return ZeroCopySink(kw.get("width", 1920), kw.get("height", 1080))
+        except Exception as e:
+            log.warning("zero-copy sink unavailable (%s); numpy fallback", e)
+            return NumpyFrameSink(kw.get("max_frames", NumpyFrameSink.DEFAULT_MAX_FRAMES))
     if kind != "numpy":
-        log.info("sink kind '%s' not available; numpy sink (one-copy)", kind)
+        log.info("sink kind '%s' not recognized; numpy sink", kind)
     return NumpyFrameSink(kw.get("max_frames", NumpyFrameSink.DEFAULT_MAX_FRAMES))

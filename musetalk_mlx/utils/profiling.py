@@ -5,7 +5,18 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-STAGES = ("stft", "whisper", "unet", "unet_build", "render", "render_eval", "vae", "vae_dec", "warp", "frame_out")
+STAGES = (
+    "stft",
+    "whisper",
+    "unet",
+    "unet_build",
+    "render",
+    "render_eval",
+    "vae",
+    "vae_dec",
+    "warp",
+    "frame_out",
+)
 
 
 def phys_footprint() -> int:
