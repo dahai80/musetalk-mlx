@@ -13,17 +13,26 @@ log = logging.getLogger(__name__)
 
 
 class _RttProbe:
-    # File-source RTT probe (audit 0921 A-3): audio is fed in --chunk-ms chunks
-    # paced at real time; RTT of a published frame = publish wall time minus the
-    # push wall time of the first feeder chunk whose sample coverage includes
-    # the frame PTS. SCOPE: this includes the AudioWindower 5s window buffering
-    # (hop 4.8s) — the PRD-level streaming-latency clarification is tracked
-    # separately and is NOT silently redesigned here.
-    def __init__(self, sr: int):
+    # File-source RTT probe (audit 0921 A-3 + release-audit P0-2): audio is
+    # fed in --chunk-ms chunks paced at real time; RTT of a published frame =
+    # publish wall time minus the push wall time of the first feeder chunk
+    # whose sample coverage includes the frame PTS.
+    #
+    # Two RTT scopes reported (release-audit P0-2):
+    #   - stable_rtt: steady-state incremental delay — frames whose PTS is past
+    #     the first full window (window_samples). Windower already full, so the
+    #     covering push was recent. This is the "audio-to-video RTT" the PRD
+    #     ≤80ms target measures in streaming steady state.
+    #   - first_packet_rtt: cold-start delay — frames whose PTS falls within
+    #     the first window. Includes the AudioWindower 5s window fill (needs a
+    #     full 5s before first emit). Real user-felt latency on the first
+    #     utterance; reported honestly, not hidden.
+    def __init__(self, sr: int, window_samples: int = 5 * 16000):
         self.sr = sr
+        self.window_samples = window_samples
         self._pushes = deque(maxlen=8192)  # (wall, samples pushed so far)
         self._total = 0
-        self._rtts = []
+        self._rtts = []  # (pts, rtt_seconds)
 
     def on_push(self, n: int) -> None:
         self._total += n
@@ -33,22 +42,35 @@ class _RttProbe:
         target = int(pts * self.sr)
         for wall, end in self._pushes:
             if end >= target:
-                self._rtts.append(time.monotonic() - wall)
+                self._rtts.append((pts, time.monotonic() - wall))
                 return
         log.debug("no covering push for pts=%.3f", pts)
 
     def write_report(self, path: str) -> dict:
-        rt = sorted(self._rtts)
+        stable = [r for pts, r in self._rtts if pts * self.sr >= self.window_samples]
+        first = [r for pts, r in self._rtts if pts * self.sr < self.window_samples]
 
-        def pct(q):
-            return rt[min(len(rt) - 1, int(q * len(rt)))] * 1000 if rt else 0.0
+        def pct(xs, q):
+            if not xs:
+                return 0.0
+            xs = sorted(xs)
+            return xs[min(len(xs) - 1, int(q * len(xs)))] * 1000
 
         report = {
-            "frames": len(rt),
-            "rtt_p50_ms": round(pct(0.50), 2),
-            "rtt_p95_ms": round(pct(0.95), 2),
-            "rtt_max_ms": round(pct(1.0), 2),
-            "scope_note": "includes AudioWindower 5s window buffering (hop 4.8s)",
+            "frames_total": len(self._rtts),
+            "stable_rtt": {
+                "frames": len(stable),
+                "p50_ms": round(pct(stable, 0.50), 2),
+                "p95_ms": round(pct(stable, 0.95), 2),
+                "max_ms": round(pct(stable, 1.0), 2),
+                "scope": "steady-state incremental (windower full); PRD <=80ms target",
+            },
+            "first_packet_rtt": {
+                "frames": len(first),
+                "p50_ms": round(pct(first, 0.50), 2),
+                "max_ms": round(pct(first, 1.0), 2),
+                "scope": "cold-start (includes 5s AudioWindower fill); user-felt first-utterance latency",
+            },
         }
         path_ = Path(path)
         path_.parent.mkdir(parents=True, exist_ok=True)
@@ -72,7 +94,7 @@ def main() -> int:
     p.add_argument("--chunk-ms", type=int, default=100, help="file-source feeder chunk size")
     a = p.parse_args()
 
-    from musetalk_mlx import MuseTalkSession
+    from musetalk_mlx import MuseTalkSession, config
     from musetalk_mlx.livekit.adapter import LiveKitAdapter
 
     session = MuseTalkSession(a.weights, a.video, fps=a.fps, mlx_dir=a.mlx_dir)
@@ -117,7 +139,7 @@ def main() -> int:
         if audio_source == "file":
             # File source: feed in real-time paced chunks so publish-side RTT
             # can attribute each frame to its covering audio chunk (audit A-3).
-            probe = _RttProbe(session.sr)
+            probe = _RttProbe(session.sr, window_samples=int(session.sr * config.WINDOW_S))
             chunk = session.sr * a.chunk_ms // 1000
 
             def _feeder():
