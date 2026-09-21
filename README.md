@@ -172,6 +172,9 @@ server) and are retracted; the A3 LiveKit E2E table above is clean-GPU.
 - Per-stage profiler (STFT/Whisper/UNet/VAE/warp/frame-out), phys-footprint memory sampling, max-contiguous-alloc probe (`musetalk_mlx/utils/profiling.py`).
 - Ops tooling: `musetalk-mlx-benchmark` (FPS + per-stage budgets, PRD 9.5) and `musetalk-mlx-stress` (long-session leak <= 50MB + fragmentation probe).
 - Edge-input tests: sub-10ms audio, all-silence, full-scale clipping.
+- Barge-in interrupt (audit 0921 P3, K12 core gap): `MuseTalkSession.interrupt()` + `LiveKitAdapter.interrupt()` clear pending/inflight/out_q and the audio prefix (truncated-utterance embedding tail would poison the next turn); `consumed` stays monotonic (output PTS never regresses); `_last_frame` kept as standby (no black screen); paste queue lightly cleared (no 2s join). Explicit API only — VAD-based auto-trigger is a future item.
+- Deadline-driven push model (audit A-1): `realtime_infer.py` pacer uses `next_deadline += period` with overrun resync instead of `sleep(period*0.5)` spin; jitter instrumentation (publish-interval p50/p95/max, overruns, pts_drift) logged every 10s + written to `results/realtime_pacing.json`. Transition state toward the PRD production "no Python main loop" target (final state = LiveKit queueing, Phase 3 follow-up).
+- Session split (audit A-1): `BackgroundStore` (bg pool / cache / precompute) and `RenderScheduler` (round submit/finish/inflight/thermal application) extracted from `session.py`; public API unchanged, audit comments migrated verbatim, profiler stage strings untouched.
 
 ## fusion-mlx dependency issues
 

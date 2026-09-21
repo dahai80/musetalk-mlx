@@ -160,6 +160,9 @@ fusion-mlx 服务器污染，已撤回；上表 A3 LiveKit E2E 为干净 GPU 数
 - 分阶段 profiler（STFT/Whisper/UNet/VAE/warp/frame-out）、phys-footprint 内存采样、最大连续分配探测（`musetalk_mlx/utils/profiling.py`）。
 - 运维工具：`musetalk-mlx-benchmark`（FPS + 分阶段预算，PRD 9.5）、`musetalk-mlx-stress`（长会话泄漏 ≤ 50MB + 碎片探测）。
 - 边界输入测试：小于 10ms 音频、全静音、满幅削波。
+- Barge-in 打断（审计 0921 P3，K12 核心缺口）：`MuseTalkSession.interrupt()` + `LiveKitAdapter.interrupt()` 清 pending/inflight/out_q 及音频前缀（被截断语音的 embedding 尾会污染下一轮）；`consumed` 保持单调（输出 PTS 不倒退）；`_last_frame` 保留为 standby（不黑屏）；paste 队列轻清（不走 2s join）。仅显式 API——VAD 自动触发为后续项。
+- Deadline 驱动 push 模型（审计 A-1）：`realtime_infer.py` pacer 用 `next_deadline += period` + overrun 重同步，替代 `sleep(period*0.5)` 空转；jitter 仪表（publish 间隔 p50/p95/max、overrun、pts_drift）每 10s log + 写 `results/realtime_pacing.json`。PRD 生产态「禁 Python 主循环」过渡达标（最终态 = LiveKit 队列化，Phase 3 后续）。
+- Session 拆分（审计 A-1）：从 `session.py` 抽出 `BackgroundStore`（bg 池/缓存/预计算）与 `RenderScheduler`（round 提交/finish/inflight/温控应用）；公共 API 不变，审计注释逐字随迁，profiler stage 字符串不动。
 
 ## fusion-mlx 依赖 issue
 
