@@ -5,7 +5,7 @@ import pytest
 
 from musetalk_mlx.face.landmarks import LandmarkTracker
 from musetalk_mlx.pipeline.session import BgCacheEntry
-from tests.paths import DIST, TEST_AUDIO, TEST_VIDEO
+from tests.paths import DIST, TEST_AUDIO, TEST_VIDEO, weights_ok
 
 log = logging.getLogger(__name__)
 
@@ -14,7 +14,7 @@ VIDEO = TEST_VIDEO
 AUDIO = TEST_AUDIO
 
 pytestmark = pytest.mark.skipif(
-    not WEIGHTS.exists(), reason="MLX dist missing (set MT_MLX_DIST or provide repo weights-mlx/)"
+    not weights_ok(), reason="MLX weights missing (set MT_MLX_DIST or place *.safetensors in weights-mlx/)"
 )
 
 

@@ -5,15 +5,15 @@ import pytest
 
 log = logging.getLogger(__name__)
 
-from tests.paths import DIST, TEST_AUDIO, TEST_VIDEO  # noqa: E402
+from tests.paths import DIST, TEST_AUDIO, TEST_VIDEO, weights_ok  # noqa: E402
 
 WEIGHTS = DIST
 VIDEO = TEST_VIDEO
 AUDIO = TEST_AUDIO
 
 pytestmark = pytest.mark.skipif(
-    not WEIGHTS.exists(),
-    reason="MLX dist missing (set MT_MLX_DIST or provide repo weights-mlx/)",
+    not weights_ok(),
+    reason="MLX weights missing (set MT_MLX_DIST or place *.safetensors in weights-mlx/)",
 )
 
 

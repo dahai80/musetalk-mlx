@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from tests.paths import DIST
+from tests.paths import DIST, weights_ok
 
 log = logging.getLogger(__name__)
 
@@ -12,8 +12,8 @@ FIXTURES = Path(__file__).parent / "fixtures"
 WEIGHTS = DIST
 
 pytestmark = pytest.mark.skipif(
-    not (FIXTURES / "meta.json").exists() or not WEIGHTS.exists(),
-    reason="parity fixtures or MLX dist missing "
+    not (FIXTURES / "meta.json").exists() or not weights_ok(),
+    reason="parity fixtures or MLX weights missing "
     "(set MT_MLX_DIST; fixtures via tools/gen_parity_fixtures.py in a torch env)",
 )
 

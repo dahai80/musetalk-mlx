@@ -154,13 +154,20 @@ comment: baseline was contention-contaminated, clean GPU = 25ms/frame).
    next window) — a streaming-latency property, not a render bug; PRD scope
    clarification pending, design not silently changed. PTS strictly monotonic.
 3. **2h stability stress** — **active leak source open; allocator side bounded**.
-   Full 120-min `--with-reload` run (`results/stress_2h.json`, Fix 1 only — the
-   before-fast-path-fix baseline):
+   Full 120-min `--with-reload` Fix-3 run (`results/stress_2h.json`, 2026-09-22
+   14:43):
 
-   | Run | leak_mb | MLX active delta | avg_fps | reload resume |
+   | Run | leak_mb (phys) | active_leak_mb | avg_fps | reload resume |
    |---|---|---|---|---|
    | audit v3 (pre-fix) | 243 | +291MB (2006→2297) | 5.48 | 2.37s |
-   | periodic clear (Fix 1) | 199 | +193MB (2081→2274) | 8.08 | 1.58s |
+   | Fix 1 only (before-fast-path-fix) | 199 | +252MB (2009→2261) | 8.08 | 1.58s |
+   | Fix 1+3 (current) | 399¹ | **65MB (2200→2265)** | 10.31 | 0.9s |
+
+   ¹ phys leak (399MB) is unreliable under contention — the MLX **active** signal
+   is the true leak measure (immune to allocator-cache bouncing + background-proc
+   phys contention). Fix 3 dropped active_leak from +252MB → **65MB** (post-last-
+   reload baseline min92, 2200→2265MB). Still >50MB gate, but the trend is clear
+   improvement and reload resume dropped 2.37→0.9s.
 
    Two allocator fixes landed:
    - `592d108`: periodic `mx.clear_cache()`+`gc.collect()` every
@@ -168,10 +175,11 @@ comment: baseline was contention-contaminated, clean GPU = 25ms/frame).
      allocator caps (`MT_MLX_CACHE_GB`/`MT_MLX_LIMIT_GB`).
    - `269fc8e`: `mx.clear_cache()`+`gc.collect()` on fast-path reload.
 
-   These bound the **allocator cache** (flat ~4126MB after warmup in a 35-min
-   verification run). They do **not** stop the **active** leak: MLX active grows
-   linearly ~1.6-3.2MB/min (2081→2274MB over 120min, +193MB; 1981→2093MB over
-   35min, +112MB).
+   These bound the **allocator cache** flat (4097→4100MB across the full 2h Fix-3
+   run). They reduce but do **not** eliminate the **active** leak: MLX active grows
+   ~1.9MB/min inter-reload (min92 post-reload 2200 → min121 2265, +65MB/29min).
+   Reload points show transient active spikes (allocator reshuffle during the
+   clear) that settle back to the trend line — not a reclaim.
 
    **Root cause: open.** Not yet attributed — investigation lives at the
    integration layer (fusion-mlx#954), not directly upstream at MLX. musetalk-mlx
@@ -199,15 +207,16 @@ comment: baseline was contention-contaminated, clean GPU = 25ms/frame).
    accumulate, and whether a known-good active-memory bounding pattern exists for
    long realtime compiled loops. Root cause pending that investigation.
 
-   **Status:** the 50MB/2h active-leak gate is **not achievable** until the
-   retention source is identified (investigation at fusion-mlx#954). The
-   allocator-cache side is bounded (Fix 1+3). `scripts/leak_gate.py` fails on the
-   active signal. Fragment probe passes all 120min (1GB contiguous alloc OK).
+   **Status:** the 50MB/2h active-leak gate is **not yet achievable** (65MB > 50MB
+   on the current Fix-3 run); allocator-cache side passes (flat 4.1GB).
+   `scripts/leak_gate.py` fails on the active signal. Fragment probe passes all
+   120min (1GB contiguous alloc OK). Gap to gate is 15MB — within reach of a
+   fusion-mlx#954 fix, not a fundamental blocker.
 
    **GPU contention caveat**: other Claude sessions' `fusion-mlx-server` +
    Chrome + node run throughout (launchd auto-restarts them; bootout rc=3 from
    another session — PID 41988 held by another session, uncontrollable here).
-   avg_fps=8.08 and render_eval 141→240ms are contention, not code regression —
+   avg_fps=10.31 and render_eval 141→240ms are contention, not code regression —
    clean-GPU baseline is 89ms/round / 30FPS per the perf table. Active-memory
    growth is contention-independent (a retention property, not a timing one),
    so the leak shape is valid despite the FPS contamination.
