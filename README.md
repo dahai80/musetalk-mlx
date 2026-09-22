@@ -112,6 +112,9 @@ Deploy-time overrides (no repackaging needed). All are `MT_*` env vars read at i
 | `MT_DECODE_128` | `false` | 2x2 avg-pool latent before decode (speed over quality) |
 | `MT_PASTE_MULTIPROC` | `false` | paste blend in a child process (off — no measured win, adds IPC) |
 | `MT_BG_POOL_MAX_FRAMES` | `240` | bg frame pool cap (8s@30fps, ~304MB); longer bg served on-demand from the reader |
+| `MT_MLX_CACHE_GB` | `4` | MLX allocator cache cap (GB). Perf-optimal; set `1` to enforce the 4GB budget (RSS ~4.2GB, ~30% FPS cost) |
+| `MT_MLX_LIMIT_GB` | `8` | MLX memory limit (GB). Set `3` to enforce the 4GB budget |
+| `MT_CLEAR_CACHE_EVERY` | `300` | render loop calls `mx.clear_cache()`+`gc.collect()` every N frames to bound RSS in long sessions (0 disables) |
 
 ## DWPose / face landmarks
 

@@ -153,9 +153,18 @@ comment: baseline was contention-contaminated, clean GPU = 25ms/frame).
    AudioWindower 5s window buffer (hop 4.8s, window-tail audio waits for the
    next window) — a streaming-latency property, not a render bug; PRD scope
    clarification pending, design not silently changed. PTS strictly monotonic.
-3. **2h stability stress** — **running (A4)**. `musetalk-mlx-stress --with-reload`,
-   reload resume <2s (fast path), phys ~6.2GB, mlx active ~2.1GB, fragmentation
-   probe OK. Leak gate (`scripts/leak_gate.py`) pending completion.
+3. **2h stability stress** — **running (audit v3 leak fix applied)**. The v3
+   audit measured leak=243MB/30min post-reload (MLX active grew ~12KB/frame).
+   Fix (commit 592d108): periodic `mx.clear_cache()`+`gc.collect()` every
+   `MT_CLEAR_CACHE_EVERY` frames (default 300) in the render loop + env-tunable
+   allocator caps (`MT_MLX_CACHE_GB`/`MT_MLX_LIMIT_GB`). Re-run verified: MLX
+   active stable 2009-2016MB across 5 min (was +291MB/120min prior). phys
+   bounces non-monotonically (cache clear reclaims) instead of the old
+   monotonic climb. Full 2h leak gate (`scripts/leak_gate.py`) pending
+   completion on a clean GPU (other Claude sessions' fusion-mlx-server +
+   Chrome contaminate this machine's GPU; FPS 2.6-12 and render_eval
+   139-357ms are contention, not code regression — clean-GPU baseline is
+   89ms/round / 30FPS per the perf table above).
 4. **Thermal ladder** — wired in-session (FR-END-003): step-cut → frame-reuse(3)
    → bg-downscale(2) → patch 256→128. Serious-tier step-cut is a no-op on the
    realtime path (fixed single-step t=0; multi-step DDIM is Nx slower) —

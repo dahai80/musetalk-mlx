@@ -107,6 +107,9 @@ weights/
 | `MT_DECODE_128` | `false` | 解码前 2x2 均值池化 latent（速度优先） |
 | `MT_PASTE_MULTIPROC` | `false` | 子进程做 paste 融合（关——无测得收益，增 IPC） |
 | `MT_BG_POOL_MAX_FRAMES` | `240` | 底片帧池上限（8s@30fps，约 304MB）；超长底片按需读取 |
+| `MT_MLX_CACHE_GB` | `4` | MLX allocator 缓存上限（GB）。性能最优值；设 `1` 以守 4GB 预算（RSS ~4.2GB，约 30% FPS 代价） |
+| `MT_MLX_LIMIT_GB` | `8` | MLX 内存上限（GB）。设 `3` 以守 4GB 预算 |
+| `MT_CLEAR_CACHE_EVERY` | `300` | 渲染循环每 N 帧 `mx.clear_cache()`+`gc.collect()` 回收 RSS（长会话泄漏收敛；0 关闭） |
 
 ## DWPose / 人脸关键点
 
