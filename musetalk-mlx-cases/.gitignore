@@ -1,0 +1,13 @@
+.venv/
+.DS_Store
+.atomcode/
+__pycache__/
+*.pyc
+
+# Large artifacts not tracked: base video/audio are symlinks into the MuseTalk
+# clone; results are regenerable. Developers fetch assets per Guideline.
+data/video/
+data/audio/
+results/*.mp4
+results/*.tmp.mp4
+/tmp/

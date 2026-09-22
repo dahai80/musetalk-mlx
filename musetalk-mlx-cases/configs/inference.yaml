@@ -1,0 +1,10 @@
+# 复刻 MuseTalk configs/inference/test.yaml 的任务布局 (路径相对项目根)
+task_0:
+  video_path: "data/video/yongen.mp4"
+  audio_path: "data/audio/yongen.wav"
+  result_name: "yongen_yongen.mp4"
+
+task_1:
+  video_path: "data/video/yongen.mp4"
+  audio_path: "data/audio/eng.wav"
+  result_name: "yongen_eng.mp4"

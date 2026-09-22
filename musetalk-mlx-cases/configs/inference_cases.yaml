@@ -1,0 +1,44 @@
+# MuseTalk README "TestCases For 1.0" 全部 8 个 cases 的复刻配置
+# 素材: musk/man/monalisa/sit/sun1/sun2/video1/yongen_img 为 README 附图
+# 转成的 5s 循环视频; sun2 对应 README 的 bbox_shift=-7 演示。
+case_musk:
+  video_path: "data/video/musk.mp4"
+  audio_path: "data/audio/yongen.wav"
+  result_name: "case_musk.mp4"
+
+case_yongen:
+  video_path: "data/video/yongen.mp4"
+  audio_path: "data/audio/yongen.wav"
+  result_name: "case_yongen.mp4"
+
+case_sit:
+  video_path: "data/video/sit.mp4"
+  audio_path: "data/audio/yongen.wav"
+  result_name: "case_sit.mp4"
+
+case_man:
+  video_path: "data/video/man.mp4"
+  audio_path: "data/audio/yongen.wav"
+  result_name: "case_man.mp4"
+
+case_monalisa:
+  video_path: "data/video/monalisa.mp4"
+  audio_path: "data/audio/yongen.wav"
+  result_name: "case_monalisa.mp4"
+
+# sun1/sun2: 用官方真实动态视频 sun.mp4 (22s, 无音轨, 配 sun.wav 22.49s)
+case_sun1:
+  video_path: "data/video/sun_amp.mp4"
+  audio_path: "data/audio/sun.wav"
+  result_name: "case_sun1.mp4"
+
+case_sun2:
+  video_path: "data/video/sun_amp.mp4"
+  audio_path: "data/audio/sun.wav"
+  result_name: "case_sun2.mp4"
+  bbox_shift: -7
+
+case_video1:
+  video_path: "data/video/video1.mp4"
+  audio_path: "data/audio/eng.wav"
+  result_name: "case_video1.mp4"
