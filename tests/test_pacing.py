@@ -28,7 +28,11 @@ def test_no_frame_still_paces_no_burst():
     while time.monotonic() - t0 < 0.3:
         p.tick(lambda: None, lambda f, pts: pub.append((f, pts)))
     assert pub == []
-    assert p.overruns <= 2  # None frames pace normally; <=2 tolerates CI scheduler jitter
+    # Don't assert overruns here: overrun is a pure scheduler-delay signal
+    # (now > deadline), independent of None/non-None, and CI jitter makes it
+    # non-deterministic in a 0.3s window (flaked 3x: 1, 2, then 3 overruns).
+    # The burst-prevention invariant is pub==[], asserted above.
+    assert p.published == 0
 
 
 def test_resync_after_slow_render_no_burst():
