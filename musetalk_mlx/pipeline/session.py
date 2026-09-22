@@ -325,6 +325,15 @@ class MuseTalkSession:
                 self._expected_pts = None
             self._audio_prefix = None
             self._thermal = ThermalController()
+            # Reclaim MLX active memory: clearing _inflight drops the last strong
+            # refs to lazy compiled-graph outputs, so clear_cache returns them to
+            # the OS. Without this, fast-path reloads (same-weight, the common A4
+            # stress scenario) accumulate ~2.4MB/min of retained graph refs
+            # (audit v3 P0-1: active grew 2081->2229MB over 99min despite the
+            # per-300-frame clear — the render-thread clear runs between reloads
+            # but the inflight graphs cleared HERE are the larger retention source).
+            mx.clear_cache()
+            gc.collect()
             if rl is not None:
                 rl.release()
             self._render_ev_set()
