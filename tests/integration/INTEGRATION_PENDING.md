@@ -153,7 +153,7 @@ comment: baseline was contention-contaminated, clean GPU = 25ms/frame).
    AudioWindower 5s window buffer (hop 4.8s, window-tail audio waits for the
    next window) — a streaming-latency property, not a render bug; PRD scope
    clarification pending, design not silently changed. PTS strictly monotonic.
-3. **2h stability stress** — **blocked on upstream MLX #3297 (not code-fixable)**.
+3. **2h stability stress** — **active leak source open; allocator side bounded**.
    Full 120-min `--with-reload` run (`results/stress_2h.json`, Fix 1 only — the
    before-fast-path-fix baseline):
 
@@ -170,26 +170,39 @@ comment: baseline was contention-contaminated, clean GPU = 25ms/frame).
 
    These bound the **allocator cache** (flat ~4126MB after warmup in a 35-min
    verification run). They do **not** stop the **active** leak: MLX active grows
-   linearly ~1.6MB/min (2081→2274MB over 120min, +193MB). Root cause traced to
-   upstream **MLX #3297** — `mx.compile`'s per-input-specialization Metal
-   shader/pipeline-state resources are never released (not on wrapper GC, not on
-   `mx.clear_cache` which is allocator-only). Verified by a 35-min
-   rebuild-compiled-gens experiment: dropping the old `mx.compile` closure +
-   rebuilding a fresh one at a reload boundary did **not** drop active
-   (pre-reload 2079MB → post-reload 2082MB, +3MB) and post-rebuild growth
-   **accelerated** to ~2.75MB/min (new closure re-accumulates while old Metal
-   resources persist). Fix reverted (negative benefit + recompile cost). No
-   Python-exposed compile-cache clear API exists on MLX 0.32.0
-   (`dir(mx)` = `clear_cache`/`set_cache_limit` allocator-only;
-   `compile_erase`/`compile_clear_cache` are C++-internal, unbound). Upstream
-   comment + repro filed on #3297 (2026-09-22).
+   linearly ~1.6-3.2MB/min (2081→2274MB over 120min, +193MB; 1981→2093MB over
+   35min, +112MB).
 
-   **Status:** the 50MB/2h active-leak gate is **not achievable** without an
-   upstream MLX fix (a `mx.clear_compile_cache()` or specialization-release on
-   `clear_cache`). The allocator-cache side is bounded (Fix 1+3); the residual
-   ~1.6MB/min active growth is an MLX-runtime floor, not a musetalk-mlx leak.
-   `scripts/leak_gate.py` fails on the active signal until #3297 lands. Fragment
-   probe passes all 120min (1GB contiguous alloc OK).
+   **Root cause: open.** Not yet attributed — investigation lives at the
+   integration layer (fusion-mlx#954), not directly upstream at MLX. musetalk-mlx
+   uses a single persistent compiled joint UNet+VAE-decode fn with **stable input
+   shapes every frame** (latent 256×256×8 fixed; audio cross-attn `(N,50,384)`
+   fixed); `mx.compile` keys its specialization cache on structure+shape+dtype,
+   not input values, and the stress loop re-pushes a bounded audio-chunk set
+   (rolling 5s window). So the per-frame active growth is not obviously an
+   `mx.compile` specialization leak. If fusion-mlx#954 confirms an MLX-runtime
+   cause, the MLX issue will be filed from the fusion-mlx side (which owns the
+   integration boundary); musetalk-mlx does not file directly against MLX for this.
+
+   **35-min rebuild-compiled-gens experiment:** dropping the old `mx.compile`
+   closure + rebuilding a fresh one at a reload boundary did **not** drop active
+   (pre-reload 2079MB → post-reload 2082MB, +3MB) and post-rebuild growth
+   **accelerated** to ~2.75MB/min. Consistent with a retained-ref or compile-cache
+   source but not conclusive. Fix reverted (negative benefit + recompile cost).
+   No Python-exposed compile-cache clear/introspection API on MLX 0.32.0
+   (`dir(mx)` = `clear_cache`/`set_cache_limit` allocator-only).
+
+   **Escalated to the integration layer:** fusion-mlx#954 (dahai80/fusion-mlx) —
+   asks whether `compile_with_custom_pass`/`apply_patterns`/the musetalk pipeline
+   retain any per-call mx.array state (module buffers, `_seen`-style globals,
+   SmartConv `_IM2COL_RULES`/`_BACKEND_RULES`, attention/KV cache) that could
+   accumulate, and whether a known-good active-memory bounding pattern exists for
+   long realtime compiled loops. Root cause pending that investigation.
+
+   **Status:** the 50MB/2h active-leak gate is **not achievable** until the
+   retention source is identified (investigation at fusion-mlx#954). The
+   allocator-cache side is bounded (Fix 1+3). `scripts/leak_gate.py` fails on the
+   active signal. Fragment probe passes all 120min (1GB contiguous alloc OK).
 
    **GPU contention caveat**: other Claude sessions' `fusion-mlx-server` +
    Chrome + node run throughout (launchd auto-restarts them; bootout rc=3 from

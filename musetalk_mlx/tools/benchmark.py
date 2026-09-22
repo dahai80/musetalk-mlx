@@ -22,9 +22,7 @@ def _gpu_contamination() -> dict:
     # (audit v3 cited contaminated artifacts as code regressions).
     procs = []
     try:
-        out = subprocess.run(
-            ["ps", "-Ao", "pid,comm"], capture_output=True, text=True, timeout=5
-        ).stdout
+        out = subprocess.run(["ps", "-Ao", "pid,comm"], capture_output=True, text=True, timeout=5).stdout
         for line in out.splitlines():
             parts = line.split(None, 1)
             if len(parts) < 2:
@@ -38,7 +36,9 @@ def _gpu_contamination() -> dict:
     try:
         out = subprocess.run(
             ["ioreg", "-r", "-k", "Device Utilization", "-d", "1"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         ).stdout
         for line in out.splitlines():
             if "Device Utilization" in line:
