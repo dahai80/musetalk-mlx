@@ -23,6 +23,7 @@ def main() -> int:
         return 2
     data = json.loads(report.read_text())
     leak_mb = data.get("leak_mb")
+    active_leak = data.get("mlx_active_leak_mb")
     passed = data.get("pass")
     if passed is None or leak_mb is None:
         print("FAIL: report missing 'pass' or 'leak_mb' fields", file=sys.stderr)
@@ -30,7 +31,8 @@ def main() -> int:
     budget = data.get("leak_budget_mb", 50.0)
     ok = bool(passed) and float(leak_mb) <= float(budget)
     status = "PASS" if ok else "FAIL"
-    print(f"{status}: leak={leak_mb}MB budget={budget}MB pass={passed}")
+    active_str = f" active_leak={active_leak}MB" if active_leak is not None else ""
+    print(f"{status}: leak={leak_mb}MB{active_str} budget={budget}MB pass={passed}")
     return 0 if ok else 1
 
 

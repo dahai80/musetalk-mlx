@@ -118,6 +118,9 @@ def main() -> int:
             )
     session.close()
     elapsed = time.monotonic() - t0
+    leak = -1
+    active_leak = -1
+    ok = False
     if len(samples) >= 2:
         # Leak baseline: first sample AFTER the last reload (reload reclaims
         # the old pipe); if no reload, baseline is samples[1] (skip warmup).
@@ -129,13 +132,26 @@ def main() -> int:
                     baseline_idx = i
                     break
         leak = samples[-1]["mem_mb"] - samples[baseline_idx]["mem_mb"]
-        ok = leak * 1024**2 <= LEAK_BUDGET_BYTES and all(s["frag_ok"] for s in samples)
+        # MLX active leak: the true leak signal, immune to allocator-cache
+        # bouncing and background-process contention that make phys noisy.
+        # active = live tensors held by refs; stable active = no leak.
+        active_leak = samples[-1]["mlx_active_mb"] - samples[baseline_idx]["mlx_active_mb"]
+        # Pass on the tighter of the two signals: a phys bounce under
+        # contention must not mask a real active leak, and an active leak
+        # must not be hidden by phys reclaim. Both must clear the budget.
+        ok = (
+            leak * 1024**2 <= LEAK_BUDGET_BYTES
+            and active_leak * 1024**2 <= LEAK_BUDGET_BYTES
+            and all(s["frag_ok"] for s in samples)
+        )
     report = {
         "duration_min": elapsed / 60,
         "frames": frames,
         "avg_fps": frames / elapsed if elapsed else 0,
         "mem_samples": samples,
         "leak_mb": leak,
+        "mlx_active_leak_mb": active_leak,
+        "leak_baseline_minute": samples[baseline_idx]["minute"] if len(samples) >= 2 else 0,
         "frag_probe_mb": a.probe_mb,
         "reloads": reloads,
         "reload_count": len(reloads),
