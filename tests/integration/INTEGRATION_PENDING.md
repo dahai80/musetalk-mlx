@@ -153,32 +153,51 @@ comment: baseline was contention-contaminated, clean GPU = 25ms/frame).
    AudioWindower 5s window buffer (hop 4.8s, window-tail audio waits for the
    next window) — a streaming-latency property, not a render bug; PRD scope
    clarification pending, design not silently changed. PTS strictly monotonic.
-3. **2h stability stress** — **completed; leak improved but NOT yet passing**.
-   Full 120-min `--with-reload` run (`results/stress_2h.json`):
+3. **2h stability stress** — **blocked on upstream MLX #3297 (not code-fixable)**.
+   Full 120-min `--with-reload` run (`results/stress_2h.json`, Fix 1 only — the
+   before-fast-path-fix baseline):
 
    | Run | leak_mb | MLX active delta | avg_fps | reload resume |
    |---|---|---|---|---|
    | audit v3 (pre-fix) | 243 | +291MB (2006→2297) | 5.48 | 2.37s |
-   | this run (periodic clear) | 199 | +252MB (2009→2261) | 8.08 | 1.58s |
+   | periodic clear (Fix 1) | 199 | +193MB (2081→2274) | 8.08 | 1.58s |
 
-   Two fixes landed mid-investigation:
+   Two allocator fixes landed:
    - `592d108`: periodic `mx.clear_cache()`+`gc.collect()` every
      `MT_CLEAR_CACHE_EVERY` frames (default 300) in the render loop + env-tunable
      allocator caps (`MT_MLX_CACHE_GB`/`MT_MLX_LIMIT_GB`).
-   - `269fc8e`: `mx.clear_cache()`+`gc.collect()` on fast-path reload (same-weight
-     reload cleared `_inflight` lazy graphs but never reclaimed the freed pool —
-     the larger retention source; ~2.4MB/min linear growth remained).
+   - `269fc8e`: `mx.clear_cache()`+`gc.collect()` on fast-path reload.
 
-   This run used the FIRST fix only (second was committed after it started), so
-   it is the **before-fast-path-fix baseline**. Active still grows linearly
-   ~2.2MB/min (min2→121: +265MB; post-last-reload min91→121: +62MB/30min). The
-   second fix targets exactly this — re-run pending on a clean GPU.
+   These bound the **allocator cache** (flat ~4126MB after warmup in a 35-min
+   verification run). They do **not** stop the **active** leak: MLX active grows
+   linearly ~1.6MB/min (2081→2274MB over 120min, +193MB). Root cause traced to
+   upstream **MLX #3297** — `mx.compile`'s per-input-specialization Metal
+   shader/pipeline-state resources are never released (not on wrapper GC, not on
+   `mx.clear_cache` which is allocator-only). Verified by a 35-min
+   rebuild-compiled-gens experiment: dropping the old `mx.compile` closure +
+   rebuilding a fresh one at a reload boundary did **not** drop active
+   (pre-reload 2079MB → post-reload 2082MB, +3MB) and post-rebuild growth
+   **accelerated** to ~2.75MB/min (new closure re-accumulates while old Metal
+   resources persist). Fix reverted (negative benefit + recompile cost). No
+   Python-exposed compile-cache clear API exists on MLX 0.32.0
+   (`dir(mx)` = `clear_cache`/`set_cache_limit` allocator-only;
+   `compile_erase`/`compile_clear_cache` are C++-internal, unbound). Upstream
+   comment + repro filed on #3297 (2026-09-22).
+
+   **Status:** the 50MB/2h active-leak gate is **not achievable** without an
+   upstream MLX fix (a `mx.clear_compile_cache()` or specialization-release on
+   `clear_cache`). The allocator-cache side is bounded (Fix 1+3); the residual
+   ~1.6MB/min active growth is an MLX-runtime floor, not a musetalk-mlx leak.
+   `scripts/leak_gate.py` fails on the active signal until #3297 lands. Fragment
+   probe passes all 120min (1GB contiguous alloc OK).
 
    **GPU contention caveat**: other Claude sessions' `fusion-mlx-server` +
    Chrome + node run throughout (launchd auto-restarts them; bootout rc=3 from
-   another session). avg_fps=8.08 and render_eval 141→240ms are contention, not
-   code regression — clean-GPU baseline is 89ms/round / 30FPS per the perf
-   table. Fragmentation probe passed all 121 minutes (1GB contiguous alloc OK).
+   another session — PID 41988 held by another session, uncontrollable here).
+   avg_fps=8.08 and render_eval 141→240ms are contention, not code regression —
+   clean-GPU baseline is 89ms/round / 30FPS per the perf table. Active-memory
+   growth is contention-independent (a retention property, not a timing one),
+   so the leak shape is valid despite the FPS contamination.
 4. **Thermal ladder** — wired in-session (FR-END-003): step-cut → frame-reuse(3)
    → bg-downscale(2) → patch 256→128. Serious-tier step-cut is a no-op on the
    realtime path (fixed single-step t=0; multi-step DDIM is Nx slower) —

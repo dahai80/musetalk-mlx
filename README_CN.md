@@ -131,7 +131,7 @@ crop。bbox 数学、卡尔曼平滑、守卫与待机逻辑由 `tests/test_land
 - [x] Phase 2（业务层）：重叠音频滑窗（前缀平滑）、生产级融合贴回 + 可插拔 face-parse 掩码、零拷贝帧出站（memoryview 直交 livekit VideoFrame，FR-LK-001）、离线 Demo 打磨。embedding 级前缀缓存待 fusion-mlx #914；face-parse 模型待 #910；native IOSurface→CVPixelBuffer 直编待 #913（livekit Python SDK 当前不直接接受 CVPixelBuffer；桥已接入非 LiveKit sink）。
 - [x] Phase 3（业务层）：完整温控降级阶梯（FR-END-003）、ReloadModel 热重载（FR-MLX-006）、LiveKit 实时适配器（FR-LK-001/002，音频继承 PTS，双向音频）、实时运行 CLI。图优化 fusion-mlx #921/#924/#932 已闭（模块级 ResnetBlock2D 熔合 + MSL Conv+GN+SiLU 内核落地，默认开）；ICB（#912）仍为上游 open 项（Python/MLX 路径未消费 — 路线分叉）。
 - [x] Phase 4（LCM）：MLX 架构下不适用。fusion-mlx pipe 本身就是 single-step t=0，没有多步 DDIM 可蒸馏成 1-step fast path——LCM 蒸馏在此是同义反复。先前的 `LCMFastSession` 桩 + `MT_LCM_ENABLED` flag 实例化了一个渲染热路径从不调用的死对象，暗示存在不存在的 fast path；两者已删，诚实处理。若 fusion-mlx 未来发布蒸馏权重 API，应重新引入真实 fast path（非桩）。
-- [x] 集成测试：神经核心已验证（`tests/integration/` 8 个集成测试通过）；#915 修复已验证（权重严格加载 + mel 打包）；#916/#917 已在 fusion-mlx v0.10.2 修复——真实关键点链路全绿（10/10 检出、bbox 合理、`_FrameSpaceDWPose` workaround 已移除）；离线 E2E 跑通（150 帧视频、真实关键点、无 guard 兜底）；A3 LiveKit 实时已实测（29.82 FPS、RTT 33.3ms、PTS 单调）；A4 2h 压测在跑。剩余门禁：离线 PSNR ≥ 38dB / SSIM ≥ 0.95 对比 MuseTalk torch 参照——`gen_gt.py` 工具存在（subprocess 进 MuseTalk checkout，MPS），尚未跑 torch GT。见 `tests/integration/INTEGRATION_PENDING.md`。
+- [x] 集成测试：神经核心已验证（`tests/integration/` 8 个集成测试通过）；#915 修复已验证（权重严格加载 + mel 打包）；#916/#917 已在 fusion-mlx v0.10.2 修复——真实关键点链路全绿（10/10 检出、bbox 合理、`_FrameSpaceDWPose` workaround 已移除）；离线 E2E 跑通（150 帧视频、真实关键点、无 guard 兜底）；A3 LiveKit 实时已实测（29.82 FPS、RTT 33.3ms、PTS 单调）；A4 2h 压测：allocator cache 已有界（Fix 1+3）；active 泄漏 ~1.6MB/min 受限于上游 MLX #3297（`mx.compile` specialization cache 无 Python 清理 API，0.32.0 无 `mx.clear_compile_cache`）——50MB/2h active 门禁在上游修复前不可达。剩余门禁：离线 PSNR ≥ 38dB / SSIM ≥ 0.95 对比 MuseTalk torch 参照——`gen_gt.py` 工具存在（subprocess 进 MuseTalk checkout，MPS），尚未跑 torch GT。见 `tests/integration/INTEGRATION_PENDING.md`。
 
 ## 性能（M5 Max）
 
@@ -194,7 +194,7 @@ fusion-mlx 服务器污染，已撤回；上表 A3 LiveKit E2E 为干净 GPU 数
 - 通过 fusion-mlx `compile_with_custom_pass`（#911）消费图优化 Pass，探测式优雅降级。
 - 零拷贝帧出站（FR-LK-001）：`LiveKitAdapter.publish_frame` 将 BGRA 像素缓冲以 `memoryview`（预分配轮转 numpy 池）交给 livekit rtc `VideoFrame`——SDK 的 `get_address` 把缓冲指针传给 FFI（`ctypes.addressof(c_char.from_buffer)`），无 `tobytes`/`bytearray` 拷贝（旧路径每帧 3 次拷贝）。`capture_frame` 为同步 FFI 请求，native 编码器在调用期间读取指针。`ZeroCopySink` 暴露 fusion-mlx #913 `MetalZeroCopyBridge`（IOSurface 承载 CVPixelBuffer，native 路径；CVPixelBufferCreate+memcpy 兜底）供非 LiveKit sink 消费者（离线、未来 native VideoToolbox 直编）；livekit Python SDK 不直接接受 CVPixelBuffer，故桥的 IOSurface 路径留作未来 native 编码器集成。
 - 分阶段 profiler（STFT/Whisper/UNet/VAE/warp/frame-out）、phys-footprint 内存采样、最大连续分配探测（`musetalk_mlx/utils/profiling.py`）。
-- 运维工具：`musetalk-mlx-benchmark`（FPS + 分阶段预算，PRD 9.5）、`musetalk-mlx-stress`（长会话泄漏 ≤ 50MB + 碎片探测）。
+- 运维工具：`musetalk-mlx-benchmark`（FPS + 分阶段预算，PRD 9.5）、`musetalk-mlx-stress`（长会话泄漏 ≤ 50MB + 碎片探测）。Allocator-cache 漂移通过；active 内存漂移受限于上游 MLX #3297（compile specialization cache，无 Python 清理 API）——见 `tests/integration/INTEGRATION_PENDING.md`。
 - 边界输入测试：小于 10ms 音频、全静音、满幅削波。
 - Barge-in 打断（审计 0921 P3，K12 核心缺口）：`MuseTalkSession.interrupt()` + `LiveKitAdapter.interrupt()` 清 pending/inflight/out_q 及音频前缀（被截断语音的 embedding 尾会污染下一轮）；`consumed` 保持单调（输出 PTS 不倒退）；`_last_frame` 保留为 standby（不黑屏）；paste 队列轻清（不走 2s join）。仅显式 API——VAD 自动触发为后续项。
 - Deadline 驱动 push 模型（审计 A-1）：`realtime_infer.py` pacer 用 `next_deadline += period` + overrun 重同步，替代 `sleep(period*0.5)` 空转；jitter 仪表（publish 间隔 p50/p95/max、overrun、pts_drift）每 10s log + 写 `results/realtime_pacing.json`。PRD 生产态「禁 Python 主循环」过渡达标（最终态 = LiveKit 队列化，Phase 3 后续）。
@@ -237,7 +237,7 @@ fusion-mlx 服务器污染，已撤回；上表 A3 LiveKit E2E 为干净 GPU 数
 
 - 日志为纯 `logging`（stderr）。生产环境把 stderr 转发到结构化 sink（Loki/Cloudwatch），对 `ERROR`/`WARNING` 速率告警。
 - 关键告警信号：`bg pool hit byte budget`、`LiveKit room disconnected`、`paste worker thread exited`、`set_ddim_steps unavailable`、`thermal` 档位转换、`NSProcessInfo unavailable`。
-- `musetalk-mlx-stress` 每采样报 RSS + MLX active/cache/peak 内存；把其 JSON 输出接入 2h 泄漏预算告警（阈值 50MB 漂移）。
+- `musetalk-mlx-stress` 每采样报 RSS + MLX active/cache/peak 内存；把其 JSON 输出接入 2h 泄漏预算告警（阈值 50MB 漂移）。注：在上游 MLX #3297 暴露 compile-cache 清理 API 前，`scripts/leak_gate.py` 在 active 信号上失败；allocator-cache 信号通过。
 
 ### 回滚
 
