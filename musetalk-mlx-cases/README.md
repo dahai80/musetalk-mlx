@@ -6,17 +6,47 @@ Lives inside the `musetalk-mlx` repo as a subdirectory and consumes its venv + c
 
 ## Cases (reproduce MuseTalk README)
 
-Each row = input image → base video (Ken Burns zoom on static images; real motion video for sun) → musetalk-mlx lip-synced output.
+Each row = input image → musetalk-mlx lip-synced output. Videos are hosted on the
+[demo-v1 release](https://github.com/dahai80/musetalk-mlx/releases/tag/demo-v1) and
+rendered inline (playable, same as the MuseTalk README).
 
-| Input | Base video | Output (musetalk-mlx) |
-|---|---|---|
-| yongen | <img src="assets/inputs/yongen.jpg" width="120"> | <img src="assets/cases/case_yongen.gif" width="160"> |
-| musk | <img src="assets/inputs/musk.jpg" width="120"> | <img src="assets/cases/case_musk.gif" width="160"> |
-| monalisa | <img src="assets/inputs/monalisa.jpg" width="120"> | <img src="assets/cases/case_monalisa.gif" width="160"> |
-| sun1 (blink amplified) | <img src="assets/inputs/sit.jpg" width="120"> | <img src="assets/cases/case_sun1.gif" width="160"> |
-| video1 | <img src="assets/inputs/video1.jpg" width="120"> | <img src="assets/cases/case_video1.gif" width="160"> |
+<table>
+<tr><th>Input</th><th>Output (musetalk-mlx)</th></tr>
+<tr>
+<td><img src="assets/inputs/yongen.jpg" width="200"></td>
+<td><video src="https://github.com/dahai80/musetalk-mlx/releases/download/demo-v1/case_yongen.mp4" controls preload></video></td>
+</tr>
+<tr>
+<td><img src="assets/inputs/musk.jpg" width="200"></td>
+<td><video src="https://github.com/dahai80/musetalk-mlx/releases/download/demo-v1/case_musk.mp4" controls preload></video></td>
+</tr>
+<tr>
+<td><img src="assets/inputs/monalisa.jpg" width="200"></td>
+<td><video src="https://github.com/dahai80/musetalk-mlx/releases/download/demo-v1/case_monalisa.mp4" controls preload></video></td>
+</tr>
+<tr>
+<td><img src="assets/inputs/sit.jpg" width="200"></td>
+<td><video src="https://github.com/dahai80/musetalk-mlx/releases/download/demo-v1/case_sit.mp4" controls preload></video></td>
+</tr>
+<tr>
+<td><img src="assets/inputs/man.jpg" width="200"></td>
+<td><video src="https://github.com/dahai80/musetalk-mlx/releases/download/demo-v1/case_man.mp4" controls preload></video></td>
+</tr>
+<tr>
+<td><img src="assets/inputs/sit.jpg" width="200"><br><sub>sun1 (blink amplified)</sub></td>
+<td><video src="https://github.com/dahai80/musetalk-mlx/releases/download/demo-v1/case_sun1.mp4" controls preload></video></td>
+</tr>
+<tr>
+<td><img src="assets/inputs/sit.jpg" width="200"><br><sub>sun2</sub></td>
+<td><video src="https://github.com/dahai80/musetalk-mlx/releases/download/demo-v1/case_sun2.mp4" controls preload></video></td>
+</tr>
+<tr>
+<td><img src="assets/inputs/video1.jpg" width="200"></td>
+<td><video src="https://github.com/dahai80/musetalk-mlx/releases/download/demo-v1/case_video1.mp4" controls preload></video></td>
+</tr>
+</table>
 
-Full result videos: `results/*.mp4` (regenerable, not tracked in git).
+Full result videos also regenerable locally: `results/*.mp4` (not tracked in git).
 
 ## Quick start
 

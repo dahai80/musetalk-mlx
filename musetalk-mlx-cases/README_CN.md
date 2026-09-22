@@ -6,15 +6,44 @@
 
 ## Cases（复刻 MuseTalk README）
 
-每行 = 输入图 → 底片视频（静态图加 Ken Burns 推镜；sun 用真实动态视频）→ musetalk-mlx 口型同步输出。
+每行 = 输入图 → musetalk-mlx 口型同步输出。视频托管在
+[demo-v1 release](https://github.com/dahai80/musetalk-mlx/releases/tag/demo-v1)，下方内联播放（可播放，同 MuseTalk README）。
 
-| 输入 | 底片视频 | 输出（musetalk-mlx） |
-|---|---|---|
-| yongen | <img src="assets/inputs/yongen.jpg" width="120"> | <img src="assets/cases/case_yongen.gif" width="160"> |
-| musk | <img src="assets/inputs/musk.jpg" width="120"> | <img src="assets/cases/case_musk.gif" width="160"> |
-| monalisa | <img src="assets/inputs/monalisa.jpg" width="120"> | <img src="assets/cases/case_monalisa.gif" width="160"> |
-| sun1（眨眼增强） | <img src="assets/inputs/sit.jpg" width="120"> | <img src="assets/cases/case_sun1.gif" width="160"> |
-| video1 | <img src="assets/inputs/video1.jpg" width="120"> | <img src="assets/cases/case_video1.gif" width="160"> |
+<table>
+<tr><th>输入</th><th>输出（musetalk-mlx）</th></tr>
+<tr>
+<td><img src="assets/inputs/yongen.jpg" width="200"></td>
+<td><video src="https://github.com/dahai80/musetalk-mlx/releases/download/demo-v1/case_yongen.mp4" controls preload></video></td>
+</tr>
+<tr>
+<td><img src="assets/inputs/musk.jpg" width="200"></td>
+<td><video src="https://github.com/dahai80/musetalk-mlx/releases/download/demo-v1/case_musk.mp4" controls preload></video></td>
+</tr>
+<tr>
+<td><img src="assets/inputs/monalisa.jpg" width="200"></td>
+<td><video src="https://github.com/dahai80/musetalk-mlx/releases/download/demo-v1/case_monalisa.mp4" controls preload></video></td>
+</tr>
+<tr>
+<td><img src="assets/inputs/sit.jpg" width="200"></td>
+<td><video src="https://github.com/dahai80/musetalk-mlx/releases/download/demo-v1/case_sit.mp4" controls preload></video></td>
+</tr>
+<tr>
+<td><img src="assets/inputs/man.jpg" width="200"></td>
+<td><video src="https://github.com/dahai80/musetalk-mlx/releases/download/demo-v1/case_man.mp4" controls preload></video></td>
+</tr>
+<tr>
+<td><img src="assets/inputs/sit.jpg" width="200"><br><sub>sun1（眨眼增强）</sub></td>
+<td><video src="https://github.com/dahai80/musetalk-mlx/releases/download/demo-v1/case_sun1.mp4" controls preload></video></td>
+</tr>
+<tr>
+<td><img src="assets/inputs/sit.jpg" width="200"><br><sub>sun2</sub></td>
+<td><video src="https://github.com/dahai80/musetalk-mlx/releases/download/demo-v1/case_sun2.mp4" controls preload></video></td>
+</tr>
+<tr>
+<td><img src="assets/inputs/video1.jpg" width="200"></td>
+<td><video src="https://github.com/dahai80/musetalk-mlx/releases/download/demo-v1/case_video1.mp4" controls preload></video></td>
+</tr>
+</table>
 
 完整结果视频：`results/*.mp4`（可重新生成，不入 git）。
 

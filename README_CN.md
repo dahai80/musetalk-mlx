@@ -1,6 +1,6 @@
 # musetalk-mlx
 
-MuseTalk 1.5 唇形同步数字人，运行于 Apple Silicon。K12 英语外教实时数字人的**业务层**，构建在 **fusion-mlx** MLX 底座之上。规格文档：[`../arch/musetalk-mig-mlx-v2-0918.md`](../arch/musetalk-mig-mlx-v2-0918.md)（PRD V1.1-RC2）。
+[MuseTalk 1.5](https://github.com/TMElyralab/MuseTalk) 唇形同步数字人的 **MLX 移植版**，运行于 Apple Silicon，运行时无 PyTorch。K12 英语外教实时数字人的**业务层**，构建在 **fusion-mlx** MLX 底座之上。规格文档：[`../arch/musetalk-mig-mlx-v2-0918.md`](../arch/musetalk-mig-mlx-v2-0918.md)（PRD V1.1-RC2）。
 
 ## 与 fusion-mlx 的分工
 
@@ -23,6 +23,39 @@ MuseTalk 1.5 唇形同步数字人，运行于 Apple Silicon。K12 英语外教�
 ## 硬指标（PRD）
 
 30 FPS · 音视频 RTT ≤ 80ms · 统一内存 ≤ 4GB · macOS 14+ · 运行时无 PyTorch。
+
+## 演示
+
+来自 [`musetalk-mlx-cases`](musetalk-mlx-cases/) 的唇形同步输出，在 MLX 上复现
+[MuseTalk](https://github.com/TMElyralab/MuseTalk) 1.0 TestCases（运行时无 PyTorch）。
+视频托管在 [demo-v1 release](https://github.com/dahai80/musetalk-mlx/releases/tag/demo-v1)，下方内联播放。
+
+<table>
+<tr><th>输入</th><th>输出（musetalk-mlx）</th></tr>
+<tr>
+<td><img src="musetalk-mlx-cases/assets/inputs/yongen.jpg" width="200"></td>
+<td><video src="https://github.com/dahai80/musetalk-mlx/releases/download/demo-v1/case_yongen.mp4" controls preload></video></td>
+</tr>
+<tr>
+<td><img src="musetalk-mlx-cases/assets/inputs/musk.jpg" width="200"></td>
+<td><video src="https://github.com/dahai80/musetalk-mlx/releases/download/demo-v1/case_musk.mp4" controls preload></video></td>
+</tr>
+<tr>
+<td><img src="musetalk-mlx-cases/assets/inputs/monalisa.jpg" width="200"></td>
+<td><video src="https://github.com/dahai80/musetalk-mlx/releases/download/demo-v1/case_monalisa.mp4" controls preload></video></td>
+</tr>
+<tr>
+<td><img src="musetalk-mlx-cases/assets/inputs/sit.jpg" width="200"><br><sub>sun1（眨眼放大）</sub></td>
+<td><video src="https://github.com/dahai80/musetalk-mlx/releases/download/demo-v1/case_sun1.mp4" controls preload></video></td>
+</tr>
+<tr>
+<td><img src="musetalk-mlx-cases/assets/inputs/man.jpg" width="200"></td>
+<td><video src="https://github.com/dahai80/musetalk-mlx/releases/download/demo-v1/case_man.mp4" controls preload></video></td>
+</tr>
+</table>
+
+完整 case 套件（sit、sun2、video1……）及复现方法见
+[`musetalk-mlx-cases/README_CN.md`](musetalk-mlx-cases/README_CN.md)。
 
 ## 安装
 
@@ -236,3 +269,14 @@ musetalk_mlx/
 ├── utils/             # 音频滑窗 + 温控分级
 └── tools/             # 权重转换 + 离线 CLI
 ```
+
+## 致谢
+
+本项目是 [TMElyralab/MuseTalk](https://github.com/TMElyralab/MuseTalk)（1.5 唇形同步数字人）
+面向 Apple Silicon 的 **MLX 移植版**。神经架构（12 通道音频条件 UNet、SD-VAE、
+Whisper-tiny、DWPose 关键点、face-parse 贴回）沿用原版 MuseTalk 设计；模型、权重与推理
+逻辑在 [MLX](https://github.com/ml-explore/mlx) 上重新实现，运行时无 PyTorch。
+
+- 原版 MuseTalk 仓库：<https://github.com/TMElyralab/MuseTalk>
+- 神经底座：[fusion-mlx](https://github.com/dahai80/fusion-mlx)
+- 演示素材（底片视频/音频）源自 MuseTalk `data/` 数据集。

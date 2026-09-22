@@ -1,6 +1,7 @@
 # musetalk-mlx
 
-MuseTalk 1.5 lip-sync digital human on Apple Silicon. The business layer of the
+MLX port of [MuseTalk 1.5](https://github.com/TMElyralab/MuseTalk) lip-sync digital
+human, running on Apple Silicon with a torch-free runtime. The business layer of the
 K12 English-teacher real-time digital human, built on the **fusion-mlx** MLX
 foundation. Spec: [`../arch/musetalk-mig-mlx-v2-0918.md`](../arch/musetalk-mig-mlx-v2-0918.md) (PRD V1.1-RC2).
 
@@ -25,6 +26,40 @@ base video frame -> 68-pt DWPose face landmarks -> 256x256 crop -> VAE encode
 ## Hard targets (PRD)
 
 30 FPS · audio-to-video RTT ≤ 80ms · ≤ 4GB unified memory · macOS 14+ · no PyTorch at runtime.
+
+## Demo
+
+Lip-synced outputs from [`musetalk-mlx-cases`](musetalk-mlx-cases/), reproducing the
+[MuseTalk](https://github.com/TMElyralab/MuseTalk) 1.0 TestCases on MLX (no PyTorch at
+runtime). Videos are hosted on the [demo-v1 release](https://github.com/dahai80/musetalk-mlx/releases/tag/demo-v1)
+and rendered inline below.
+
+<table>
+<tr><th>Input</th><th>Output (musetalk-mlx)</th></tr>
+<tr>
+<td><img src="musetalk-mlx-cases/assets/inputs/yongen.jpg" width="200"></td>
+<td><video src="https://github.com/dahai80/musetalk-mlx/releases/download/demo-v1/case_yongen.mp4" controls preload></video></td>
+</tr>
+<tr>
+<td><img src="musetalk-mlx-cases/assets/inputs/musk.jpg" width="200"></td>
+<td><video src="https://github.com/dahai80/musetalk-mlx/releases/download/demo-v1/case_musk.mp4" controls preload></video></td>
+</tr>
+<tr>
+<td><img src="musetalk-mlx-cases/assets/inputs/monalisa.jpg" width="200"></td>
+<td><video src="https://github.com/dahai80/musetalk-mlx/releases/download/demo-v1/case_monalisa.mp4" controls preload></video></td>
+</tr>
+<tr>
+<td><img src="musetalk-mlx-cases/assets/inputs/sit.jpg" width="200"><br><sub>sun1 (blink amplified)</sub></td>
+<td><video src="https://github.com/dahai80/musetalk-mlx/releases/download/demo-v1/case_sun1.mp4" controls preload></video></td>
+</tr>
+<tr>
+<td><img src="musetalk-mlx-cases/assets/inputs/man.jpg" width="200"></td>
+<td><video src="https://github.com/dahai80/musetalk-mlx/releases/download/demo-v1/case_man.mp4" controls preload></video></td>
+</tr>
+</table>
+
+Full case suite (sit, sun2, video1, …) + how to regenerate: see
+[`musetalk-mlx-cases/README.md`](musetalk-mlx-cases/README.md).
 
 ## Setup
 
@@ -248,3 +283,15 @@ musetalk_mlx/
 ├── utils/             # audio windower + thermal tiers
 └── tools/             # weight conversion + offline CLI
 ```
+
+## Acknowledgements
+
+This project is an **MLX port** of [TMElyralab/MuseTalk](https://github.com/TMElyralab/MuseTalk)
+(1.5 lip-sync digital human) for Apple Silicon. The neural architecture (12-channel
+audio-conditioned UNet, SD-VAE, Whisper-tiny, DWPose landmarks, face-parsing paste-back)
+follows the original MuseTalk design; the models, weights, and inference logic are
+reimplemented on [MLX](https://github.com/ml-explore/mlx) with a torch-free runtime.
+
+- Original MuseTalk repo: <https://github.com/TMElyralab/MuseTalk>
+- Neural foundation: [fusion-mlx](https://github.com/dahai80/fusion-mlx)
+- Demo assets (base video/audio) originate from the MuseTalk `data/` set.
