@@ -1,3 +1,4 @@
+import gc
 import logging
 import queue
 import threading
@@ -272,7 +273,11 @@ class MuseTalkSession:
         # cache) — 4GB keeps every decode intermediate resident without
         # hoarding. Memory budget must also clear the real working set: live
         # peak is ~4.6GB, and a 3GB budget made the allocator reclaim
-        # mid-round, costing +27ms/round.
+        # mid-round, costing +27ms/round. Env-tunable (MT_MLX_CACHE_GB /
+        # MT_MLX_LIMIT_GB) so the 4GB PRD budget can be enforced per-deploy
+        # (1/3 caps -> RSS ~4.2GB) without repackaging.
+        cache_gb = config.MLX_CACHE_LIMIT_GB
+        limit_gb = config.MLX_MEMORY_LIMIT_GB
         setter = getattr(mx, "set_cache_limit", None) or getattr(
             getattr(mx, "metal", None), "set_cache_limit", None
         )
@@ -281,10 +286,10 @@ class MuseTalkSession:
         )
         try:
             if setter is not None:
-                setter(4 * 1024 * 1024 * 1024)
+                setter(cache_gb * 1024 * 1024 * 1024)
             if limiter is not None:
-                limiter(8 * 1024 * 1024 * 1024)
-            log.info("MLX render memory tuned: cache<=4GB, limit 8GB (post-warmup)")
+                limiter(limit_gb * 1024 * 1024 * 1024)
+            log.info("MLX render memory tuned: cache<=%dGB, limit %dGB (post-warmup)", cache_gb, limit_gb)
         except Exception as e:
             log.info("MLX cache tuning unavailable (%s); defaults kept", e)
 
@@ -424,6 +429,8 @@ class MuseTalkSession:
         # serialize against mid-round teardown; it is uncontended in steady
         # state (one producer, uncontended Lock ~ns).
         log.info("render thread started")
+        _clear_every = config.CLEAR_CACHE_EVERY
+        _rendered = 0
         while not self._closed:
             self._encode_windows()
             if not self._pending and not self._inflight:
@@ -451,6 +458,17 @@ class MuseTalkSession:
                     ladder = self._thermal.ladder()
                     # pop=False: frames stay in out_q for the consumer.
                     self._scheduler.next_step(ladder, pop=False)
+                _rendered += 1
+                if _clear_every and _rendered % _clear_every == 0:
+                    # Bounding long-session RSS growth (audit v3 P0-1: 2h stress
+                    # leaked 243MB, active grew ~7KB/frame from retained graph
+                    # refs + Python intermediates). mx.clear_cache() returns the
+                    # allocator's freed-but-retained pool to the OS; gc.collect()
+                    # reclaims unreachable numpy/cv2 buffers the ref-cycle GC
+                    # wouldn't otherwise prompt. The next round re-allocates
+                    # within the cache cap — a sub-ms cost vs the RSS budget win.
+                    mx.clear_cache()
+                    gc.collect()
                 self._render_ev.set()  # re-check pending: more windows may have arrived
             except Exception:
                 # A render failure must not kill the producer thread (Rule 12):

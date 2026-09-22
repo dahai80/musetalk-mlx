@@ -136,3 +136,20 @@ DECODE_128 = _env_bool("MT_DECODE_128", False)
 # Enable only if a benchmark proves inline paste >15ms/round AND MLX holds the
 # GIL through the sync; ship that benchmark with the change.
 PASTE_MULTIPROC = _env_bool("MT_PASTE_MULTIPROC", False)
+
+# MLX allocator caps (PRD <=4GB unified memory). Defaults (4GB cache / 8GB
+# limit) are perf-optimal on MLX 0.32.0 — a tighter cap forces mid-round
+# reclamation (+27ms/round measured). To enforce the 4GB budget set
+# MT_MLX_CACHE_GB=1 + MT_MLX_LIMIT_GB=3 (RSS ~4.2GB measured, essentially
+# meeting the PRD budget at a ~30% FPS cost). Override per-deploy without
+# repackaging. Set post-warmup in session._set_render_cache.
+MLX_CACHE_LIMIT_GB = _env_int("MT_MLX_CACHE_GB", 4)
+MLX_MEMORY_LIMIT_GB = _env_int("MT_MLX_LIMIT_GB", 8)
+
+# Periodic allocator-cache return in the render loop. MLX's allocator retains
+# freed buffers in its cache (up to MLX_CACHE_LIMIT_GB); a long session still
+# grows active memory from retained graph refs (~7KB/frame measured on the
+# 2h stress). Every CLEAR_CACHE_EVERY frames, mx.clear_cache() returns the
+# cached-but-unused pool to the OS and gc.collect() reclaims Python-side
+# numpy/intermediate refs, bounding RSS growth. 0 disables.
+CLEAR_CACHE_EVERY = _env_int("MT_CLEAR_CACHE_EVERY", 300)
