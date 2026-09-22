@@ -71,7 +71,7 @@ paste-back chain).
 ## Performance (M5 Max, clean GPU, fusion-mlx server + linguakids watchdog stopped)
 
 Methodology: background GPU load inflates every number several-fold. Before
-measuring: `~/fusion/fusion-mlx/start.sh stop`,
+measuring: `/path/to/fusion-mlx/start.sh stop`,
 `launchctl bootout gui/$(id -u)/com.linguakids.watchdog`, and check
 `ioreg -l | grep '"Device Utilization %"'` ≈ 0. Other Claude sessions spawn
 `fusion_mlx.media.image_worker` / `fusion-mlx-server` on demand — verify with

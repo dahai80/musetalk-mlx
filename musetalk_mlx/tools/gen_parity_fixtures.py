@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -27,6 +28,11 @@ def main() -> int:
         "--weights",
         default="/tmp/mtlk_weights",
         help="torch weights root (whisper-tiny, sd-vae-ft-mse, MuseTalk unet)",
+    )
+    p.add_argument(
+        "--musetalk-src",
+        default=os.environ.get("MT_MUSETALK", str(Path(__file__).resolve().parents[3] / "MuseTalk")),
+        help="MuseTalk repo clone root (for the torch UNet source)",
     )
     p.add_argument("--out", default="tests/parity/fixtures")
     a = p.parse_args()
@@ -67,7 +73,7 @@ def main() -> int:
     # matching fusion-mlx generate_faces(apply_pe -> unet).
     import sys
 
-    sys.path.insert(0, "/Users/dahai/migration/MuseTalk")
+    sys.path.insert(0, a.musetalk_src)
     from musetalk.models.unet import PositionalEncoding, UNet
 
     u = UNet(

@@ -11,12 +11,12 @@ Background GPU load (other sessions, the linguakids watchdog) inflates numbers
 several-fold. Before measuring:
 
 ```bash
-~/fusion/fusion-mlx/start.sh stop
+/path/to/fusion-mlx/start.sh stop
 launchctl bootout gui/501/com.linguakids.watchdog 2>/dev/null || true
 ioreg -r -k "Device Utilization" -d 1 | grep "Device Utilization"  # expect ≈0
 ```
 
-Start a fresh process for each run. Restore after: `~/fusion/fusion-mlx/start.sh start`.
+Start a fresh process for each run. Restore after: `/path/to/fusion-mlx/start.sh start`.
 
 ## 1. Leak gate (2h stress)
 

@@ -33,7 +33,7 @@ cd musetalk-mlx
 python3.12 -m venv .venv
 source .venv/bin/activate
 # fusion-mlx neural core (editable, from its checkout):
-pip install -e ~/fusion/fusion-mlx
+pip install -e /path/to/fusion-mlx
 pip install -e ".[dev]"
 ```
 
@@ -204,7 +204,7 @@ server) and are retracted; the A3 LiveKit E2E table above is clean-GPU.
 
 1. **Prereqs**: Xcode 18.0 command-line tools, Python 3.11 venv, `brew install ffmpeg`. PyObjC required for thermal monitoring: `pip install pyobjc`. Without it the session logs a warning and runs normal-tier only (no thermal degradation).
 2. **Weights**: place under `weights/` (MuseTalk `unet.pth` ~3.2GB, `whisper-tiny`, `sd-vae-ft-mse`, `weights/eval`). Torch-free users must obtain pre-converted MLX safetensors (see Weight distribution below) — `musetalk-mlx-convert` requires a torch env and cannot run torch-free.
-3. **fusion-mlx**: install editable from its checkout (`pip install -e ~/fusion/fusion-mlx[video]`), pinned `>=0.10.2,<0.11`. Start/stop the service with `~/fusion/fusion-mlx/start.sh start|stop`.
+3. **fusion-mlx**: install editable from its checkout (`pip install -e /path/to/fusion-mlx[video]`), pinned `>=0.10.2,<0.11`. Start/stop the service with `/path/to/fusion-mlx/start.sh start|stop`.
 4. **Offline**: `musetalk-mlx-offline --weights weights --audio in.wav --video base.mp4 --out out.mp4`. Output is muxed with source audio via ffmpeg (audit B1).
 5. **Realtime (LiveKit)**: `musetalk-mlx-realtime --weights weights --video base.mp4 --livekit-url wss://... --token <jwt>`. Token is held only for connect/reconnect and dropped on close.
 6. **Auto-start (launchd)**: wrap the realtime CLI in a `~/Library/LaunchAgents/io.musetalk.mlx.plist` with `KeepAlive=true` so a crash restarts the daemon.

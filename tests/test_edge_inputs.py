@@ -1,9 +1,9 @@
+
 import numpy as np
 import pytest
 
 from musetalk_mlx.utils.audio import AudioWindower
-
-VIDEO = "/Users/dahai/migration/MuseTalk/data/video/sun.mp4"
+from tests.paths import TEST_VIDEO as VIDEO
 
 
 class _StubPipe:

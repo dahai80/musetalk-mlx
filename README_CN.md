@@ -31,7 +31,7 @@ cd musetalk-mlx
 python3.12 -m venv .venv
 source .venv/bin/activate
 # 先装 fusion-mlx 神经底座（editable，从其检出目录）：
-pip install -e ~/fusion/fusion-mlx
+pip install -e /path/to/fusion-mlx
 pip install -e ".[dev]"
 ```
 
@@ -192,7 +192,7 @@ fusion-mlx 服务器污染，已撤回；上表 A3 LiveKit E2E 为干净 GPU 数
 
 1. **前置依赖**：Xcode 18.0 命令行工具、Python 3.11 venv、`brew install ffmpeg`。温控监测需 PyObjC：`pip install pyobjc`。缺失时 session 打 warning，仅跑 normal 档（无温控降级）。
 2. **权重**：放在 `weights/`（MuseTalk `unet.pth` ~3.2GB、`whisper-tiny`、`sd-vae-ft-mse`、`weights/eval`）。torch-free 用户须获取预转换 MLX safetensors（见下文权重分发），`musetalk-mlx-convert` 需 torch 环境，torch-free 下无法自建。
-3. **fusion-mlx**：从 checkout 可编辑安装（`pip install -e ~/fusion/fusion-mlx[video]`），锁定 `>=0.10.2,<0.11`。起停服务用 `~/fusion/fusion-mlx/start.sh start|stop`。
+3. **fusion-mlx**：从 checkout 可编辑安装（`pip install -e /path/to/fusion-mlx[video]`），锁定 `>=0.10.2,<0.11`。起停服务用 `/path/to/fusion-mlx/start.sh start|stop`。
 4. **离线**：`musetalk-mlx-offline --weights weights --audio in.wav --video base.mp4 --out out.mp4`。输出经 ffmpeg mux 源音频（审计 B1）。
 5. **实时（LiveKit）**：`musetalk-mlx-realtime --weights weights --video base.mp4 --livekit-url wss://... --token <jwt>`。token 仅供 connect/重连持有，close 时丢弃。
 6. **自启（launchd）**：把实时 CLI 包进 `~/Library/LaunchAgents/io.musetalk.mlx.plist`，`KeepAlive=true` 让崩溃后自动拉起。
