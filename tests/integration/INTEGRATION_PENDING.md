@@ -153,18 +153,32 @@ comment: baseline was contention-contaminated, clean GPU = 25ms/frame).
    AudioWindower 5s window buffer (hop 4.8s, window-tail audio waits for the
    next window) — a streaming-latency property, not a render bug; PRD scope
    clarification pending, design not silently changed. PTS strictly monotonic.
-3. **2h stability stress** — **running (audit v3 leak fix applied)**. The v3
-   audit measured leak=243MB/30min post-reload (MLX active grew ~12KB/frame).
-   Fix (commit 592d108): periodic `mx.clear_cache()`+`gc.collect()` every
-   `MT_CLEAR_CACHE_EVERY` frames (default 300) in the render loop + env-tunable
-   allocator caps (`MT_MLX_CACHE_GB`/`MT_MLX_LIMIT_GB`). Re-run verified: MLX
-   active stable 2009-2016MB across 5 min (was +291MB/120min prior). phys
-   bounces non-monotonically (cache clear reclaims) instead of the old
-   monotonic climb. Full 2h leak gate (`scripts/leak_gate.py`) pending
-   completion on a clean GPU (other Claude sessions' fusion-mlx-server +
-   Chrome contaminate this machine's GPU; FPS 2.6-12 and render_eval
-   139-357ms are contention, not code regression — clean-GPU baseline is
-   89ms/round / 30FPS per the perf table above).
+3. **2h stability stress** — **completed; leak improved but NOT yet passing**.
+   Full 120-min `--with-reload` run (`results/stress_2h.json`):
+
+   | Run | leak_mb | MLX active delta | avg_fps | reload resume |
+   |---|---|---|---|---|
+   | audit v3 (pre-fix) | 243 | +291MB (2006→2297) | 5.48 | 2.37s |
+   | this run (periodic clear) | 199 | +252MB (2009→2261) | 8.08 | 1.58s |
+
+   Two fixes landed mid-investigation:
+   - `592d108`: periodic `mx.clear_cache()`+`gc.collect()` every
+     `MT_CLEAR_CACHE_EVERY` frames (default 300) in the render loop + env-tunable
+     allocator caps (`MT_MLX_CACHE_GB`/`MT_MLX_LIMIT_GB`).
+   - `269fc8e`: `mx.clear_cache()`+`gc.collect()` on fast-path reload (same-weight
+     reload cleared `_inflight` lazy graphs but never reclaimed the freed pool —
+     the larger retention source; ~2.4MB/min linear growth remained).
+
+   This run used the FIRST fix only (second was committed after it started), so
+   it is the **before-fast-path-fix baseline**. Active still grows linearly
+   ~2.2MB/min (min2→121: +265MB; post-last-reload min91→121: +62MB/30min). The
+   second fix targets exactly this — re-run pending on a clean GPU.
+
+   **GPU contention caveat**: other Claude sessions' `fusion-mlx-server` +
+   Chrome + node run throughout (launchd auto-restarts them; bootout rc=3 from
+   another session). avg_fps=8.08 and render_eval 141→240ms are contention, not
+   code regression — clean-GPU baseline is 89ms/round / 30FPS per the perf
+   table. Fragmentation probe passed all 121 minutes (1GB contiguous alloc OK).
 4. **Thermal ladder** — wired in-session (FR-END-003): step-cut → frame-reuse(3)
    → bg-downscale(2) → patch 256→128. Serious-tier step-cut is a no-op on the
    realtime path (fixed single-step t=0; multi-step DDIM is Nx slower) —
