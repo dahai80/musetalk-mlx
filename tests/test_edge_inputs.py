@@ -4,6 +4,13 @@ import pytest
 from musetalk_mlx.utils.audio import AudioWindower
 from tests.paths import TEST_VIDEO as VIDEO
 
+# Model-free tests (StubPipe, no weights) but session_e2e-style cases need the
+# test VIDEO for BackgroundStore frame reading. CI has no MuseTalk clone ->
+# FileNotFoundError without this gate. windower-only tests below are unguarded.
+_skip_no_video = pytest.mark.skipif(
+    not VIDEO.exists(), reason=f"test video missing: {VIDEO} (set MT_TEST_VIDEO)"
+)
+
 
 class _StubPipe:
     # Model-free pipe stub: zero chunks + identity latents, so edge inputs
@@ -73,6 +80,7 @@ def test_windower_short_audio_never_emits():
     assert win is None and pts is None
 
 
+@_skip_no_video
 def test_session_silence_no_crash_standby(session):
     # All-zero audio: window encodes, tracker idle -> standby base frames.
     session.push_audio(np.zeros(16000 * 6, dtype=np.float32))
@@ -83,6 +91,7 @@ def test_session_silence_no_crash_standby(session):
     assert pts >= 0.0
 
 
+@_skip_no_video
 def test_session_clipping_no_crash(session):
     # Full-scale square wave (爆音): must not crash, output stays valid.
     pcm = np.sign(np.sin(np.linspace(0, 1000 * 2 * np.pi, 16000 * 6))) * 1.0
