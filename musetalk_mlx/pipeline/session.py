@@ -986,7 +986,20 @@ class MuseTalkSession:
             log.warning("graph pass unavailable (%s); plain generate_faces", e)
 
     def _preload_bg(self) -> None:
-        self._bg_store.preload(self._tracker, self._cropper, self.pipe)
+        # Async precompute at construction (mirrors the reload() rebuild):
+        # the synchronous pass blocked the constructor — and therefore the
+        # first render — for the WHOLE pass (105s measured on a 22s/
+        # 240-frame base video), so a real-human avatar showed a moving idle
+        # face but never lip-moved for the whole session (single-flight
+        # skipped every follow-up utterance behind the stuck first render).
+        # While the cache is empty the render path uses its live fallback;
+        # precompute swaps the cache in atomically when done. Opt out with
+        # MT_ASYNC_PRECOMPUTE=0 (emergency revert to the old blocking path).
+        import os as _os
+
+        async_pc = _os.environ.get("MT_ASYNC_PRECOMPUTE", "1") == "1"
+        self._bg_store.preload(self._tracker, self._cropper, self.pipe,
+                               precompute_async=async_pc)
 
     def _precompute_cache(self, frames) -> None:
         self._bg_store.precompute_cache(frames, self._tracker, self._cropper, self.pipe)

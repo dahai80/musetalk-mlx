@@ -53,7 +53,7 @@ class BackgroundStore:
         # render thread a half-populated list (audit R8).
         self._bg_cache_lock = threading.Lock()
 
-    def preload(self, tracker, cropper, pipe) -> None:
+    def preload(self, tracker, cropper, pipe, precompute_async: bool = False) -> None:
         # FR-END-002: preload the base-video frames into a memory pool (looped
         # serving from RAM, no per-frame decode cost). CAP at BG_POOL_MAX_FRAMES
         # — a long base video (10min = ~3.7GB at 1080p) would otherwise OOM the
@@ -96,7 +96,27 @@ class BackgroundStore:
                 mb,
             )
         if config.PRECOMPUTE and frames:
-            self.precompute_cache(frames, tracker, cropper, pipe)
+            if precompute_async:
+                # Construction-time precompute: run it OFF the constructor
+                # thread (mirrors the reload() async-rebuild path). Synchronous
+                # precompute here blocked the very first render for the whole
+                # pass (measured 105s on a 22s/240-frame base video) — the
+                # first utterance sat behind it and single-flight skipped every
+                # follow-up, so a real-human avatar showed a moving idle face
+                # but never lip-moved for the entire session. With the cache
+                # still empty the render path takes its live fallback
+                # (tracker+crop+VAE per frame), so the first utterance renders
+                # (slower) while precompute fills the cache and swaps it in
+                # atomically when done.
+                self._precompute_thread = threading.Thread(
+                    target=self.precompute_cache,
+                    args=(frames, tracker, cropper, pipe),
+                    name="bg-precompute",
+                    daemon=True,
+                )
+                self._precompute_thread.start()
+            else:
+                self.precompute_cache(frames, tracker, cropper, pipe)
 
     def precompute_cache(self, frames, tracker, cropper, pipe) -> None:
         # MuseTalk-realtime-style offline pass: per base frame precompute
